@@ -13,6 +13,52 @@
 - License file: `LICENSE`
 
 ## Recent Updates
+- 2026-05-23: Three combined improvements to compression time + circuit serialisation
+  efficiency.
+  1. **Bounded framed-payload analyzer** (`zbit-rs/src/pack/recursive.rs`). The
+     `build_framed_payload_run` scanner now caps each individual frame at 64 MiB and
+     caps cumulative CRC32 work at 256 MiB across the whole scan; after committing to a
+     valid multi-frame run, `start` advances past the run instead of `+= 1`. On a 95 MiB
+     PyTorch model that previously burned 64.6 minutes in framed_extraction (false-
+     positive CRC32 checks over megabytes per offset on non-framed input), the analyzer
+     now returns in milliseconds. On cat (real framed-deflate input), the same change
+     drops framed_extraction from 215 ms to 2.8 ms because we no longer re-probe every
+     offset after the run is found.
+  2. **Tuned-XZ candidate cache** (`zbit-rs/src/pack/codecs.rs` +
+     `zbit-rs/src/pack/core.rs`). New `tuned_xz_outputs` namespace in the compression
+     cache keyed by `(payload_hash, allow_xz_extreme, profile)`. Avoids the duplicate
+     full XZ matrix walk that previously fired both inside `build_raw_xz_payload` and
+     inside any other caller hashing the same byte stream. Reported as
+     `tuned-xz hits/misses` in the benchmark report.
+  3. **Bit-packed (compact) topology serialisation** — the headline circuit-representation
+     win. Legacy topology nodes used a fixed 28-byte-per-node on-disk layout (id/parent
+     u32 each + relation u8 + order u16 + kind u8 + param_a/b u32 each + 8-byte hash).
+     The new compact form writes:
+     - 1 flag byte `(relation:1 | order:7)`,
+     - 1 raw `kind` byte,
+     - varint-encoded `id`, `parent_id+1` (0 = root sentinel), `param_a`, `param_b`,
+     - **no per-node hash** (overall decode correctness already validates the topology
+       end-to-end through the inverse-transform pipeline).
+
+     A trivial root node serialises in 6 bytes (was 28); a node carrying a PNG-stride
+     6401 period serialises in 7 bytes (was 28). The on-disk topology-count `u16` gets
+     a new `0x4000 RECURSIVE_TOPOLOGY_COMPACT_FLAG` (counterpart of the existing 0x8000
+     multi-block flag); legacy dictionaries without the flag continue to decode with the
+     fixed-width path and full hash verification.
+
+  Measured impact on the existing corpus:
+  - paper `0.331855` ratio unchanged, time `101 → 64 ms` (~1.6 x faster).
+  - primary.3b `0.174058` ratio unchanged, time `4 780 → 3 695 ms` (~1.3 x faster).
+  - cat ratio **improved** `0.899412 → 0.899383` (86 fewer bytes thanks to compact
+    topology — ~22 bytes saved per node × 4 typical nodes), time `60 335 → 49 632 ms`
+    (~1.2 x faster, framed_extraction collapsed).
+  - depth_anything: `5 429 743 → 1 405 690 ms` (~3.9 x faster); framed_extraction alone
+    `3 877 752 → 255 ms`. Ratio unchanged at `0.840376`. The remaining cost is
+    legitimate XZ work: 946 s in raw-xz tuning + 289 s in adaptive transform evaluation.
+  Tests: new `compact_topology_node_size_beats_legacy_layout` exercises the per-node
+  sizing math; the existing `multi_block_apply_invert_roundtrip` was updated to
+  recompute the expected dictionary footprint via the size formula instead of relying
+  on the legacy 28-byte-per-node assumption. All 22 lib tests + integration suite PASS.
 - 2026-05-23: Added a new tracked benchmark corpus (PyTorch model file) and landed a new
   pack method `AdaptiveTransformedXz` that delivers a concrete ratio win on it.
   - New script `zbit-rs/scripts/benchmark_depth_anything.sh` (downloads

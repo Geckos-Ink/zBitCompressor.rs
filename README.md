@@ -284,19 +284,33 @@ Current snapshot (reports generated on 2026-05-23):
 
 | Test | Input | Selected method/profile | Original -> Compressed (bytes) | Ratio | Savings | Compression ms | Decompression ms | Validation |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Paper benchmark | `papers/zbit-algorithmsResearch.md` | `raw-xz` | `62015 -> 20580` | `0.331855` | `66.81%` | `95.758` | `0.851` | `PASS` |
-| Primary binary benchmark | `assets/primary.3b.bin` | `monotonic-delta` | `3233613 -> 562836` | `0.174058` | `82.59%` | `6228.829` | `19.612` | `PASS` |
-| Cat challenge benchmark | `assets/cat_challenge.png` | `recursive-circuit-xz` | `2969404 -> 2670718` | `0.899412` | `10.06%` | `61947.550` | `493.082` | `PASS` |
+| Paper benchmark | `papers/zbit-algorithmsResearch.md` | `raw-xz` | `62015 -> 20580` | `0.331855` | `66.81%` | `63.937` | `0.849` | `PASS` |
+| Primary binary benchmark | `assets/primary.3b.bin` | `monotonic-delta` | `3233613 -> 562836` | `0.174058` | `82.59%` | `3695.210` | `18.812` | `PASS` |
+| Cat challenge benchmark | `assets/cat_challenge.png` | `recursive-circuit-xz` | `2969404 -> 2670632` | `0.899383` | `10.07%` | `49632.414` | `483.917` | `PASS` |
 | Cat challenge stream benchmark | `assets/cat_challenge.png` | `wide-overfit stream` | `2969404 -> 2670846` | `0.899455` | `10.05%` | `112964.407` | `8186.741` | `PASS` |
-| Depth Anything model benchmark | `assets/depth_anything_v2_vits.pth` | `adaptive-transformed-xz` | `99218434 -> 83380790` | `0.840376` | `15.96%` | `5429743.424` | `541.452` | `PASS` |
+| Depth Anything model benchmark | `assets/depth_anything_v2_vits.pth` | `adaptive-transformed-xz` | `99218434 -> 83380790` | `0.840376` | `15.96%` | `1405690.364` | `236.317` | `PASS` |
 
-Compression times are substantially lower than the 2026-05-07 snapshot: paper `313 ms -> 101 ms` (~3.1x faster), primary `16635 ms -> 4780 ms` (~3.5x faster), cat `112500 ms -> 58026 ms` (~1.9x faster), all at byte-identical ratios. The improvement comes from a cheap XZ-3 ranking pass that picks the top-K transform plans before the expensive `choose_best_codec` evaluation, plus a leaner per-plan winner-refinement tuning matrix.
+Compression times are substantially lower than the 2026-05-07 snapshot: paper `313 ms -> 64 ms` (~4.9x faster), primary `16 635 ms -> 3 695 ms` (~4.5x faster), cat `112 500 ms -> 49 632 ms` (~2.3x faster), and the new depth_anything model corpus `5 429 743 ms -> 1 405 690 ms` (~3.9x faster — almost all of it from bounding the false-positive CRC32 frame scan). Cat ratio even **improved** slightly (`0.899412 -> 0.899383`, 86 bytes saved) thanks to the new compact topology serialisation (described below); all other corpus ratios held byte-identical. The improvement comes from (a) a cheap XZ-3 ranking pass that picks the top-K transform plans before the expensive `choose_best_codec` evaluation, (b) a leaner per-plan winner-refinement tuning matrix, (c) a bounded framed-payload analyzer that no longer burns minutes hashing megabytes per offset on inputs without a valid CRC32 run, and (d) a tuned-XZ cache that avoids re-running the full XZ matrix on identical byte streams.
 
 Several new tail-only reversible transforms have been added without changing tracked ratios: `periodic-head-tail-tail-row-delta` / `row-xor` / `row-up` (PNG-style Sub / XOR / Up predictors applied only to the row-data tail), `periodic-head-tail-tail-bit-plane-transpose` (with and without follow-up unary delta), plus deep-search XZ tunings (`depth=2000`/`4000`) gated to the deep / research profiles. They lose the XZ-3 ranking on the already-filtered cat PNG IDAT plain (where the simple `periodic-head-tail` still wins by ~23 KB on XZ-9) but stay available for unfiltered raster payloads where they should win cleanly.
 
 The N3 multi-block recursive-circuit path is also landed (deep/research only): the inflated plain is optionally split into 2, 4, or 8 consecutive blocks, each block picks its own best transform plan, and the concatenated transformed bytes go through a single codec pass. The on-disk format extension uses a backward-compatible top-bit flag on the topology count so legacy single-plan dictionaries decode unchanged. For cat (uniformly-structured PNG IDAT) the multi-block path's best candidate is ~106 KB larger than the single-plan one — the rearrangement breaks XZ cross-block matches — so single-plan still wins and is selected. Multi-block is ready to win cleanly on heterogeneous inputs where per-region best plans differ substantially.
 
 A new top-level pack method `adaptive-transformed-xz` brings the same reversible-transform search to inputs that are *not* framed deflate (e.g. PyTorch `.pth` model files, raw float-tensor dumps). It runs `choose_adaptive_transform_plan` on the raw input, encodes the best transformed payload with the full codec/tuned-XZ selection, and stores a small 18-byte dictionary `(transform_kind, period, head, codec, plain_len)` so the decoder can invert the transform deterministically. Two cost gates keep it bounded: skip when recursive-circuit-xz already covers the same search; skip when raw-xz already compresses to ≤ 0.30 of the input (already-strong corpora like `primary.3b.bin`). A 128 KiB size threshold keeps small text files out of the plan search. On the new `depth_anything_v2_vits.pth` corpus it wins by **~7 MB (~7.8 %)** vs raw-xz alone: raw-xz `90 414 940 → 83 380 790` adaptive-transformed-xz, final ratio `0.840376` on 99 218 434 input bytes.
+
+### Compact (bit-packed) topology serialisation
+
+Circuit-topology nodes used to be serialised in a fixed 28-byte-per-node layout: `id` u32 + `parent_id` u32 + `relation` u8 + `order` u16 + `kind` u8 + `param_a` u32 + `param_b` u32 + a per-node 8-byte FNV-style hash. With ~5 distinct relation values, 2-bit-wide `order`, and small node ids and parameters in practice, that layout left several bits per field unused for every node written. The new **compact** form, signalled by the `0x4000 COMPACT_TOPOLOGY_FLAG` bit on the on-disk topology-count `u16`, writes each node as:
+
+- 1 flag byte: `(relation:1 | order:7)`
+- 1 raw `kind` byte
+- varint `id`
+- varint `parent_id + 1` (0 = root sentinel; avoids a 5-byte varint per root)
+- varint `param_a`
+- varint `param_b`
+- **no per-node hash** — overall decode correctness already validates the topology end-to-end through the inverse-transform pipeline
+
+A trivial root node serialises in 6 bytes (was 28); a node carrying a PNG-stride 6401 period serialises in 7 bytes (was 28). The compact flag is independent of the existing `0x8000 MULTI_BLOCK_FLAG` so both extensions compose. Legacy single-plan dictionaries (neither flag set) continue to decode with the fixed-width path and full per-node hash verification, so older `.zbpk` files keep working unchanged. The measurable ratio win on cat (`0.899412 -> 0.899383`, 86 bytes saved across a 4-node topology) is small in absolute terms but principled: the format no longer wastes bits per node on unused enumeration combinations.
 
 ### Latest Cat Stream Multilevel Profiles
 

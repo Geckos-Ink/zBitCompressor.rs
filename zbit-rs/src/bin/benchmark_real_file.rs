@@ -213,6 +213,7 @@ Candidate timing breakdown (ms):\n\
 \n\
 Cache stats:\n\
 - codec hits/misses: {codec_hits}/{codec_misses}\n\
+- tuned-xz hits/misses: {tuned_xz_hits}/{tuned_xz_misses}\n\
 - preflate hits/misses: {preflate_hits}/{preflate_misses}\n\
 - stream-range hits/misses: {stream_range_hits}/{stream_range_misses}\n\
 \n\
@@ -296,6 +297,8 @@ Output validation: {valid}\n",
         recursive_total_ms = stats.timings.recursive_total_ms,
         candidate_validation_ms = stats.timings.candidate_validation_ms,
         codec_hits = stats.cache_stats.codec_hits,
+        tuned_xz_hits = stats.cache_stats.tuned_xz_hits,
+        tuned_xz_misses = stats.cache_stats.tuned_xz_misses,
         codec_misses = stats.cache_stats.codec_misses,
         preflate_hits = stats.cache_stats.preflate_hits,
         preflate_misses = stats.cache_stats.preflate_misses,

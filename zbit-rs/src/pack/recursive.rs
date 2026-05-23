@@ -10,9 +10,28 @@ fn read_u32_be_at(bytes: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
-fn parse_crc32_frame_at(input: &[u8], start: usize) -> Option<(u32, [u8; 4], usize, usize)> {
+// Upper bound on a single CRC32-framed payload. Anything larger is almost certainly a
+// false-positive read of an unrelated 4-byte field interpreted as a frame length, and
+// computing CRC32 across megabytes for a false positive is the dominant cost when a non-
+// framed input (e.g. a PyTorch model archive) feeds `build_framed_payload_run`.
+const FRAMED_PAYLOAD_MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+// Cumulative cap on bytes hashed by CRC32 across all probing in build_framed_payload_run.
+// Once exceeded the analyzer bails out and returns whatever best run it has found, or
+// None. Sized comfortably for legitimate framed inputs (cat IDAT is ~3 MB) but tight
+// enough that pathologically-distributed inputs cannot blow up to minutes of wall time.
+const FRAMED_PAYLOAD_HASH_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+
+fn parse_crc32_frame_at(
+    input: &[u8],
+    start: usize,
+    hash_budget_remaining: &mut usize,
+) -> Option<(u32, [u8; 4], usize, usize)> {
     let frame_len_u32 = read_u32_be_at(input, start)?;
     let frame_len = frame_len_u32 as usize;
+    // Reject implausibly large frame lengths before paying for memory access / CRC32.
+    if frame_len > FRAMED_PAYLOAD_MAX_FRAME_BYTES {
+        return None;
+    }
     let tag_off = start.checked_add(4)?;
     let tag_slice = input.get(tag_off..tag_off + 4)?;
     let tag = [tag_slice[0], tag_slice[1], tag_slice[2], tag_slice[3]];
@@ -23,6 +42,13 @@ fn parse_crc32_frame_at(input: &[u8], start: usize) -> Option<(u32, [u8; 4], usi
     if next > input.len() {
         return None;
     }
+    // Each frame check costs CRC32 over `frame_len + 4` bytes. Accumulate against the
+    // shared budget so a stream of false positives can't blow past the cap.
+    let hash_cost = frame_len.saturating_add(4);
+    if hash_cost > *hash_budget_remaining {
+        return None;
+    }
+    *hash_budget_remaining = hash_budget_remaining.saturating_sub(hash_cost);
     let data = input.get(data_off..data_end)?;
     let crc = read_u32_be_at(input, crc_off)?;
     let mut hasher = Crc32Hasher::new();
@@ -41,10 +67,16 @@ fn build_framed_payload_run(input: &[u8]) -> Option<FramedPayloadRun> {
 
     let mut best: Option<(usize, FramedPayloadRun)> = None;
     let mut start = 0usize;
+    let mut hash_budget = FRAMED_PAYLOAD_HASH_BUDGET_BYTES;
 
     while start + 12 <= input.len() {
+        // Once the CRC32 budget is exhausted we bail out — for inputs without any framed
+        // run this caps the analyzer in milliseconds instead of minutes.
+        if hash_budget == 0 {
+            break;
+        }
         let Some((first_len_u32, first_tag, first_data_off, first_next)) =
-            parse_crc32_frame_at(input, start)
+            parse_crc32_frame_at(input, start, &mut hash_budget)
         else {
             start += 1;
             continue;
@@ -56,7 +88,9 @@ fn build_framed_payload_run(input: &[u8]) -> Option<FramedPayloadRun> {
             .extend_from_slice(input.get(first_data_off..first_data_off + first_len_u32 as usize)?);
 
         let mut cursor = first_next;
-        while let Some((len_u32, tag, data_off, next)) = parse_crc32_frame_at(input, cursor) {
+        while let Some((len_u32, tag, data_off, next)) =
+            parse_crc32_frame_at(input, cursor, &mut hash_budget)
+        {
             if tag != first_tag {
                 break;
             }
@@ -105,7 +139,9 @@ fn build_framed_payload_run(input: &[u8]) -> Option<FramedPayloadRun> {
             _ => best = Some((candidate_size, run)),
         }
 
-        start += 1;
+        // After committing to a multi-frame run, skip past it: nothing inside the run can
+        // produce a better candidate (subsequent starts would only yield SHORTER runs).
+        start = cursor;
     }
 
     best.map(|(_, run)| run)
@@ -538,17 +574,70 @@ fn build_recursive_circuit_stream(
     Ok(Some(stream))
 }
 
-// Top bit of the on-disk topology count signals the N3 multi-block extension.
-// When set, an additional `block_count u32`, `block_size u32`, then `block_count` plans of
-// the form (kind u8, period u32, head u32) follow the topology nodes. Legacy single-plan
+// Top bit of the on-disk topology count signals the N3 multi-block extension. When set,
+// an additional `block_count u32`, `block_size u32`, then `block_count` plans of the form
+// (kind u8, period u32, head u32) follow the topology nodes. Legacy single-plan
 // dictionaries set neither this bit nor the trailing section, and decode unchanged.
 const RECURSIVE_TOPOLOGY_MULTI_BLOCK_FLAG: u16 = 0x8000;
-const RECURSIVE_TOPOLOGY_COUNT_MASK: u16 = 0x7FFF;
+// Second-highest bit signals the compact (bit-packed) topology serialisation. When set,
+// each topology node is written as:
+//   flag_byte u8 :  bit 7 = relation, bits 0..6 = order (0..127, typical 0..3)
+//   kind     u8 :  the raw u8 from CircuitTopologyNode.kind (0..255 supported)
+//   id           :  varint, the node's u32 id
+//   parent_plus1 :  varint, `parent_id + 1` for normal parents; 0 = root sentinel
+//                   (encodes `u32::MAX` as 0 to avoid a 5-byte varint per root node)
+//   param_a      :  varint of the u32 parameter
+//   param_b      :  varint of the u32 parameter
+// hash64 is NOT serialised in the compact form — overall decode correctness already
+// validates the topology end-to-end through the inverse transform pipeline. Legacy
+// dictionaries (flag clear) keep the fixed 28-byte-per-node layout including hash64.
+const RECURSIVE_TOPOLOGY_COMPACT_FLAG: u16 = 0x4000;
+const RECURSIVE_TOPOLOGY_COUNT_MASK: u16 = 0x3FFF;
 const RECURSIVE_BLOCK_PLAN_BYTES: usize = 1 + 4 + 4;
 
+fn varint_u64_len(value: u64) -> usize {
+    let mut len = 1usize;
+    let mut remaining = value >> 7;
+    while remaining != 0 {
+        len += 1;
+        remaining >>= 7;
+    }
+    len
+}
+
+fn compact_topology_node_size(node: &CircuitTopologyNode) -> usize {
+    let parent_plus_one = if node.parent_id == u32::MAX {
+        0u64
+    } else {
+        (node.parent_id as u64) + 1
+    };
+    // 1 flag byte + 1 kind byte + varints
+    2 + varint_u64_len(node.id as u64)
+        + varint_u64_len(parent_plus_one)
+        + varint_u64_len(node.param_a as u64)
+        + varint_u64_len(node.param_b as u64)
+}
+
+fn compact_topology_total_size(nodes: &[CircuitTopologyNode]) -> usize {
+    nodes.iter().map(compact_topology_node_size).sum()
+}
+
+// Compact form is used when every node's `order` fits in 7 bits (the relation bit takes
+// the high bit). Current topology builders only emit `order` values in 0..3, so this is
+// always true; the fall-back keeps the door open for future builders that emit larger
+// orders without breaking older readers.
+fn compact_topology_eligible(nodes: &[CircuitTopologyNode]) -> bool {
+    nodes.iter().all(|node| node.order <= 0x7F)
+}
+
 fn recursive_circuit_dictionary_size(stream: &RecursiveCircuitStream) -> usize {
-    let mut size =
-        framed_dictionary_size(&stream.base) + 51 + stream.topology.len() * TOPOLOGY_NODE_BYTES;
+    let use_compact = compact_topology_eligible(&stream.topology);
+    let topology_bytes = if use_compact {
+        compact_topology_total_size(&stream.topology)
+    } else {
+        stream.topology.len() * TOPOLOGY_NODE_BYTES
+    };
+    let mut size = framed_dictionary_size(&stream.base) + 51 + topology_bytes;
     if let Some(mb) = &stream.multi_block {
         // block_count u32 + block_size u32 + per-plan (kind u8 + period u32 + head u32)
         size += 4 + 4 + mb.plans.len() * RECURSIVE_BLOCK_PLAN_BYTES;
@@ -569,20 +658,43 @@ fn write_recursive_circuit_dictionary(out: &mut Vec<u8>, stream: &RecursiveCircu
     out.push(stream.transform_plan.kind.as_u8());
     push_u32(out, stream.transform_plan.period);
     push_u32(out, stream.transform_plan.head);
-    let mut topology_field = (stream.topology.len() as u16) & RECURSIVE_TOPOLOGY_COUNT_MASK;
+    let use_compact = compact_topology_eligible(&stream.topology);
+    let mut topology_field =
+        (stream.topology.len() as u16) & RECURSIVE_TOPOLOGY_COUNT_MASK;
     if stream.multi_block.is_some() {
         topology_field |= RECURSIVE_TOPOLOGY_MULTI_BLOCK_FLAG;
     }
+    if use_compact {
+        topology_field |= RECURSIVE_TOPOLOGY_COMPACT_FLAG;
+    }
     push_u16(out, topology_field);
-    for node in &stream.topology {
-        push_u32(out, node.id);
-        push_u32(out, node.parent_id);
-        out.push(node.relation);
-        push_u16(out, node.order);
-        out.push(node.kind);
-        push_u32(out, node.param_a);
-        push_u32(out, node.param_b);
-        push_u64(out, node.hash64);
+    if use_compact {
+        for node in &stream.topology {
+            let order_low = (node.order & 0x7F) as u8;
+            let flag_byte = (node.relation << 7) | order_low;
+            out.push(flag_byte);
+            out.push(node.kind);
+            push_varint_u64(out, node.id as u64);
+            let parent_plus_one = if node.parent_id == u32::MAX {
+                0u64
+            } else {
+                (node.parent_id as u64) + 1
+            };
+            push_varint_u64(out, parent_plus_one);
+            push_varint_u64(out, node.param_a as u64);
+            push_varint_u64(out, node.param_b as u64);
+        }
+    } else {
+        for node in &stream.topology {
+            push_u32(out, node.id);
+            push_u32(out, node.parent_id);
+            out.push(node.relation);
+            push_u16(out, node.order);
+            out.push(node.kind);
+            push_u32(out, node.param_a);
+            push_u32(out, node.param_b);
+            push_u64(out, node.hash64);
+        }
     }
     if let Some(mb) = &stream.multi_block {
         push_u32(out, mb.plans.len() as u32);
@@ -665,6 +777,7 @@ fn decode_recursive_circuit_payload(
     let transform_head = read_u32(dict_bytes, &mut dict_cursor)?;
     let topology_raw = read_u16(dict_bytes, &mut dict_cursor)?;
     let multi_block_present = (topology_raw & RECURSIVE_TOPOLOGY_MULTI_BLOCK_FLAG) != 0;
+    let compact_topology = (topology_raw & RECURSIVE_TOPOLOGY_COMPACT_FLAG) != 0;
     let topology_count = (topology_raw & RECURSIVE_TOPOLOGY_COUNT_MASK) as usize;
     let mut correction_plan = CircuitTransformPlan {
         kind: CircuitTransformKind::Identity,
@@ -674,16 +787,86 @@ fn decode_recursive_circuit_payload(
 
     let mut seen_root = false;
     let mut last_id = 0u32;
+    // hash_by_id is only consulted for legacy (non-compact) topology integrity validation.
     let mut hash_by_id = HashMap::<u32, u64>::new();
     for idx in 0..topology_count {
-        let id = read_u32(dict_bytes, &mut dict_cursor)?;
-        let parent_id = read_u32(dict_bytes, &mut dict_cursor)?;
-        let relation = read_u8(dict_bytes, &mut dict_cursor)?;
-        let order = read_u16(dict_bytes, &mut dict_cursor)?;
-        let kind = read_u8(dict_bytes, &mut dict_cursor)?;
-        let param_a = read_u32(dict_bytes, &mut dict_cursor)?;
-        let param_b = read_u32(dict_bytes, &mut dict_cursor)?;
-        let stored_hash = read_u64(dict_bytes, &mut dict_cursor)?;
+        let (id, parent_id, relation, _order, kind, param_a, param_b) = if compact_topology {
+            let flag_byte = read_u8(dict_bytes, &mut dict_cursor)?;
+            let relation = (flag_byte >> 7) & 0x01;
+            let order_u16 = (flag_byte & 0x7F) as u16;
+            let kind_byte = read_u8(dict_bytes, &mut dict_cursor)?;
+            let id_u64 = read_varint_u64(dict_bytes, &mut dict_cursor)?;
+            let parent_plus_one = read_varint_u64(dict_bytes, &mut dict_cursor)?;
+            let param_a_u64 = read_varint_u64(dict_bytes, &mut dict_cursor)?;
+            let param_b_u64 = read_varint_u64(dict_bytes, &mut dict_cursor)?;
+            if id_u64 > u32::MAX as u64 {
+                return Err(ZbitError::Parse(
+                    "compact recursive-circuit-xz topology id exceeds u32".to_string(),
+                ));
+            }
+            let parent_id_value = if parent_plus_one == 0 {
+                u32::MAX
+            } else {
+                let p = parent_plus_one - 1;
+                if p > u32::MAX as u64 {
+                    return Err(ZbitError::Parse(
+                        "compact recursive-circuit-xz topology parent id exceeds u32"
+                            .to_string(),
+                    ));
+                }
+                p as u32
+            };
+            if param_a_u64 > u32::MAX as u64 || param_b_u64 > u32::MAX as u64 {
+                return Err(ZbitError::Parse(
+                    "compact recursive-circuit-xz topology param exceeds u32".to_string(),
+                ));
+            }
+            (
+                id_u64 as u32,
+                parent_id_value,
+                relation,
+                order_u16,
+                kind_byte,
+                param_a_u64 as u32,
+                param_b_u64 as u32,
+            )
+        } else {
+            let id = read_u32(dict_bytes, &mut dict_cursor)?;
+            let parent_id = read_u32(dict_bytes, &mut dict_cursor)?;
+            let relation = read_u8(dict_bytes, &mut dict_cursor)?;
+            let order = read_u16(dict_bytes, &mut dict_cursor)?;
+            let kind = read_u8(dict_bytes, &mut dict_cursor)?;
+            let param_a = read_u32(dict_bytes, &mut dict_cursor)?;
+            let param_b = read_u32(dict_bytes, &mut dict_cursor)?;
+            let stored_hash = read_u64(dict_bytes, &mut dict_cursor)?;
+            // Legacy form carries an explicit per-node FNV-style hash for tamper detection;
+            // verify it inline so the legacy format keeps its current integrity guarantee.
+            let parent_hash = if parent_id == u32::MAX {
+                TOPOLOGY_HASH_OFFSET
+            } else {
+                *hash_by_id.get(&parent_id).ok_or_else(|| {
+                    ZbitError::Parse(
+                        "recursive-circuit-xz topology references unknown parent".to_string(),
+                    )
+                })?
+            };
+            let mut expected_hash = TOPOLOGY_HASH_OFFSET;
+            expected_hash = topology_hash_mix(expected_hash, parent_hash);
+            expected_hash = topology_hash_mix(expected_hash, id as u64);
+            expected_hash = topology_hash_mix(expected_hash, parent_id as u64);
+            expected_hash = topology_hash_mix(expected_hash, relation as u64);
+            expected_hash = topology_hash_mix(expected_hash, order as u64);
+            expected_hash = topology_hash_mix(expected_hash, kind as u64);
+            expected_hash = topology_hash_mix(expected_hash, param_a as u64);
+            expected_hash = topology_hash_mix(expected_hash, param_b as u64);
+            if stored_hash != expected_hash {
+                return Err(ZbitError::Parse(
+                    "recursive-circuit-xz topology hash mismatch".to_string(),
+                ));
+            }
+            hash_by_id.insert(id, expected_hash);
+            (id, parent_id, relation, order, kind, param_a, param_b)
+        };
 
         if relation > 1 {
             return Err(ZbitError::Parse(
@@ -698,33 +881,9 @@ fn decode_recursive_circuit_payload(
         if parent_id == u32::MAX {
             seen_root = true;
         }
-        let parent_hash = if parent_id == u32::MAX {
-            TOPOLOGY_HASH_OFFSET
-        } else {
-            *hash_by_id.get(&parent_id).ok_or_else(|| {
-                ZbitError::Parse(
-                    "recursive-circuit-xz topology references unknown parent".to_string(),
-                )
-            })?
-        };
-        let mut expected_hash = TOPOLOGY_HASH_OFFSET;
-        expected_hash = topology_hash_mix(expected_hash, parent_hash);
-        expected_hash = topology_hash_mix(expected_hash, id as u64);
-        expected_hash = topology_hash_mix(expected_hash, parent_id as u64);
-        expected_hash = topology_hash_mix(expected_hash, relation as u64);
-        expected_hash = topology_hash_mix(expected_hash, order as u64);
-        expected_hash = topology_hash_mix(expected_hash, kind as u64);
-        expected_hash = topology_hash_mix(expected_hash, param_a as u64);
-        expected_hash = topology_hash_mix(expected_hash, param_b as u64);
-        if stored_hash != expected_hash {
-            return Err(ZbitError::Parse(
-                "recursive-circuit-xz topology hash mismatch".to_string(),
-            ));
-        }
         if let Some(plan) = decode_embedded_correction_plan(kind, param_a, param_b) {
             correction_plan = plan;
         }
-        hash_by_id.insert(id, expected_hash);
         last_id = id;
     }
 

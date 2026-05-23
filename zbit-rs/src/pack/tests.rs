@@ -491,18 +491,65 @@ mod tests {
         };
         let mut dict_bytes = Vec::new();
         write_recursive_circuit_dictionary(&mut dict_bytes, &stream);
-        // The topology count field lives just before the topology nodes; it's the u16 at
-        // offset (recursive_circuit_dictionary_size minus topology_nodes minus 8 - 8 bytes).
-        // The simplest verification is that the serialised size matches the size formula
-        // and that the size includes the multi-block plan section.
+        // Verify the serialised size matches the size formula exactly and that the
+        // multi-block plan section is the expected extra payload over a single-plan
+        // dictionary built from the same topology (with the same compact/legacy form).
         assert_eq!(dict_bytes.len(), recursive_circuit_dictionary_size(&stream));
-        assert!(
-            dict_bytes.len()
-                > framed_dictionary_size(&stream.base)
-                    + 51
-                    + stream.topology.len() * TOPOLOGY_NODE_BYTES,
-            "multi-block dictionary must carry extra plan bytes beyond the single-plan footprint"
+        let mut single_plan_stream = stream.clone();
+        single_plan_stream.multi_block = None;
+        let single_plan_size = recursive_circuit_dictionary_size(&single_plan_stream);
+        let expected_multi_block_bytes = 4 + 4 + plans.len() * RECURSIVE_BLOCK_PLAN_BYTES;
+        assert_eq!(
+            dict_bytes.len(),
+            single_plan_size + expected_multi_block_bytes,
+            "multi-block plan section must add exactly {expected_multi_block_bytes} bytes \
+             beyond the single-plan dictionary size"
         );
+    }
+
+    #[test]
+    fn compact_topology_node_size_beats_legacy_layout() {
+        // Sanity check on the new circuit-representation savings: for a typical small-id /
+        // small-param node the compact serialisation should produce strictly fewer bytes
+        // than the fixed 28-byte legacy layout. This guards against regressions in the
+        // varint encoding or in the "kind + relation + order" packing.
+        let node = CircuitTopologyNode {
+            id: 1,
+            parent_id: u32::MAX,
+            relation: 0,
+            order: 0,
+            kind: 0,
+            param_a: 0,
+            param_b: 0,
+            hash64: 0,
+        };
+        let compact_size = compact_topology_node_size(&node);
+        assert!(
+            compact_size < TOPOLOGY_NODE_BYTES,
+            "compact node should be smaller than legacy 28-byte node, got {compact_size}"
+        );
+        // A trivial root node should fit in 6 bytes: 1 flag + 1 kind + 1 (id=1) + 1 (parent
+        // sentinel) + 1 (param_a=0) + 1 (param_b=0). Anything larger means a varint regression.
+        assert!(
+            compact_size <= 6,
+            "trivial root node should serialise in <= 6 bytes, got {compact_size}"
+        );
+
+        // A node with a medium-sized period (typical PNG stride 6401) takes 2 bytes for
+        // the period varint; check the math.
+        let node_with_period = CircuitTopologyNode {
+            id: 3,
+            parent_id: 1,
+            relation: 1,
+            order: 2,
+            kind: 4,
+            param_a: 6401,
+            param_b: 1,
+            hash64: 0,
+        };
+        let sized = compact_topology_node_size(&node_with_period);
+        // 1 flag + 1 kind + 1 id + 1 parent + 2 (period 6401 varint) + 1 = 7
+        assert_eq!(sized, 7, "expected exactly 7 bytes for medium-period node");
     }
 
     #[test]

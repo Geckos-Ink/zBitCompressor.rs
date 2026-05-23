@@ -62,9 +62,12 @@ fn decode_raw_zstd_payload(payload: &[u8], original_size: usize) -> ZbitResult<V
     Ok(out)
 }
 
-fn build_raw_xz_payload(input: &[u8], profile: CompressionProfile) -> ZbitResult<Vec<u8>> {
-    let allow_xz_extreme = profile.enable_xz_extreme_for_raw_xz();
-    let (_, payload) = choose_best_tuned_xz_candidate(input, profile, allow_xz_extreme)?
+fn build_raw_xz_payload(
+    input: &[u8],
+    context: &mut CompressionContext,
+) -> ZbitResult<Vec<u8>> {
+    let allow_xz_extreme = context.profile.enable_xz_extreme_for_raw_xz();
+    let (_, payload) = choose_best_tuned_xz_candidate_cached(input, allow_xz_extreme, context)?
         .ok_or_else(|| ZbitError::Internal("raw-xz candidate set is empty".to_string()))?;
     Ok(payload)
 }
@@ -1217,6 +1220,34 @@ fn choose_best_codec(
         .min_by_key(|(rank, _, payload)| (payload.len(), *rank))
         .ok_or_else(|| ZbitError::Internal("codec candidate set is empty".to_string()))?;
     Ok((codec, payload))
+}
+
+fn choose_best_tuned_xz_candidate_cached(
+    data: &[u8],
+    allow_xz_extreme: bool,
+    context: &mut CompressionContext,
+) -> ZbitResult<Option<(PayloadCodec, Vec<u8>)>> {
+    // The tuned-XZ matrix is the dominant per-encode cost on multi-MB payloads (~30 min on
+    // a 95 MB PyTorch model). Both the top-level raw-xz candidate and the adaptive-
+    // transformed-xz winner refinement frequently invoke it on the same byte stream — in
+    // particular when the adaptive plan winner is Identity the two calls are literally
+    // identical. Caching by `(input_hash, allow_xz_extreme, profile)` collapses that
+    // duplication to a single matrix walk.
+    let key = TunedXzCacheKey {
+        input_hash: payload_hash(data),
+        allow_xz_extreme,
+        profile: context.profile,
+    };
+    if let Some(cached) = context.cache.tuned_xz_outputs.get(&key) {
+        context.cache_stats.tuned_xz_hits =
+            context.cache_stats.tuned_xz_hits.saturating_add(1);
+        return Ok(cached.clone());
+    }
+    context.cache_stats.tuned_xz_misses =
+        context.cache_stats.tuned_xz_misses.saturating_add(1);
+    let result = choose_best_tuned_xz_candidate(data, context.profile, allow_xz_extreme)?;
+    context.cache.tuned_xz_outputs.insert(key, result.clone());
+    Ok(result)
 }
 
 fn choose_best_codec_cached(

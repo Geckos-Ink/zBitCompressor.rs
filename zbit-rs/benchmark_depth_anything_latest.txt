@@ -1,5 +1,5 @@
 zBit-rs Real File Benchmark Report
-Generated: 2026-05-23 10:11:35
+Generated: 2026-05-23 12:42:35
 Input file: assets/depth_anything_v2_vits.pth
 Compressed artifact: /tmp/depth_anything.zbpk
 
@@ -29,27 +29,28 @@ Compressed size (bytes): 83380790
 Compression ratio (compressed/original): 0.840376
 Space savings (%): 15.96
 
-Compression time (ms): 5429743.424
-Decompression time (ms): 541.452
-Compression throughput (MiB/s): 0.017
-Decompression throughput (MiB/s): 174.756
+Compression time (ms): 1405690.364
+Decompression time (ms): 236.317
+Compression throughput (MiB/s): 0.067
+Decompression throughput (MiB/s): 400.404
 
 Candidate timing breakdown (ms):
-- index stream build: 2521.394
-- huffman stream build: 3465.476
-- raw-deflate encode: 2558.258
-- raw-zstd encode: 24681.741
-- raw-xz encode: 1079689.991
-- framed extraction: 3877752.208
+- index stream build: 2429.689
+- huffman stream build: 3279.752
+- raw-deflate encode: 2218.119
+- raw-zstd encode: 16698.641
+- raw-xz encode: 946355.293
+- framed extraction: 255.331
 - recursive preflate search: 0.000
-- recursive transform sampling: 77.202
-- recursive transform evaluation: 282262.022
+- recursive transform sampling: 75.494
+- recursive transform evaluation: 289206.030
 - recursive correction modeling: 0.000
 - recursive total: 0.000
 - candidate validation: 0.000
 
 Cache stats:
 - codec hits/misses: 0/0
+- tuned-xz hits/misses: 0/1
 - preflate hits/misses: 0/0
 - stream-range hits/misses: 0/0
 

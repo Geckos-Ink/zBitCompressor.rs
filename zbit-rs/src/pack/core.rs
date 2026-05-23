@@ -206,6 +206,8 @@ pub struct CacheStats {
     pub preflate_misses: usize,
     pub stream_range_hits: usize,
     pub stream_range_misses: usize,
+    pub tuned_xz_hits: usize,
+    pub tuned_xz_misses: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -630,6 +632,13 @@ struct CodecProfileKey {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+struct TunedXzCacheKey {
+    input_hash: PayloadHash,
+    allow_xz_extreme: bool,
+    profile: CompressionProfile,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 struct StreamRangeCacheKey {
     input_hash: PayloadHash,
     abs_start_chunk: usize,
@@ -644,6 +653,11 @@ struct CompressionCache {
     codec_outputs: HashMap<(PayloadHash, CodecProfileKey), (PayloadCodec, Vec<u8>)>,
     preflate_outputs: HashMap<(PayloadHash, u32), Option<(Vec<u8>, Vec<u8>)>>,
     stream_range_candidates: HashMap<StreamRangeCacheKey, PackedRangeCandidate>,
+    // Cache for `choose_best_tuned_xz_candidate(input, profile, allow_xz_extreme)`. Reused
+    // when both the top-level `raw-xz` candidate and the adaptive-transformed-xz winner
+    // refinement encode the same byte stream (e.g. when the adaptive plan winner is
+    // Identity), avoiding the ~30-minute duplicate XZ matrix walk on multi-MB inputs.
+    tuned_xz_outputs: HashMap<TunedXzCacheKey, Option<(PayloadCodec, Vec<u8>)>>,
 }
 
 #[derive(Debug)]
@@ -1460,7 +1474,7 @@ fn compress_adaptive_to_bytes(input: &[u8]) -> ZbitResult<(Vec<u8>, PackStats)> 
     let raw_zstd_candidate_bytes = Some(ZBPK_HEADER_BYTES + raw_zstd_payload.len());
 
     let raw_xz_timer = Instant::now();
-    let raw_xz_payload = build_raw_xz_payload(input, context.profile)?;
+    let raw_xz_payload = build_raw_xz_payload(input, &mut context)?;
     context.timings.raw_xz_ms = raw_xz_timer.elapsed().as_secs_f64() * 1000.0;
     let raw_xz_candidate_bytes = Some(ZBPK_HEADER_BYTES + raw_xz_payload.len());
 
