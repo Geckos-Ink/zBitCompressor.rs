@@ -1,5 +1,5 @@
 zBit-rs Real File Benchmark Report
-Generated: 2026-05-23 17:14:54
+Generated: 2026-05-23 22:44:56
 Input file: papers/zbit-algorithmsResearch.md
 Compressed artifact: /tmp/paper.zbpk
 
@@ -30,18 +30,18 @@ Compressed size (bytes): 20561
 Compression ratio (compressed/original): 0.331549
 Space savings (%): 66.85
 
-Compression time (ms): 75.091
-Decompression time (ms): 2.294
-Compression throughput (MiB/s): 0.788
-Decompression throughput (MiB/s): 25.780
+Compression time (ms): 76.060
+Decompression time (ms): 2.532
+Compression throughput (MiB/s): 0.778
+Decompression throughput (MiB/s): 23.355
 
 Candidate timing breakdown (ms):
-- index stream build: 0.783
-- huffman stream build: 1.149
-- raw-deflate encode: 1.851
-- raw-zstd encode: 22.759
-- raw-xz encode: 45.538
-- framed extraction: 0.147
+- index stream build: 0.941
+- huffman stream build: 1.412
+- raw-deflate encode: 3.614
+- raw-zstd encode: 27.737
+- raw-xz encode: 41.559
+- framed extraction: 0.146
 - recursive preflate search: 0.000
 - recursive transform sampling: 0.000
 - recursive transform evaluation: 0.000

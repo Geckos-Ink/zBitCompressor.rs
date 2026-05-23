@@ -432,12 +432,18 @@ fn build_recursive_circuit_stream(
                     );
                 }
             }
-            // Sort by total candidate cost (payload bytes + per-plan metadata) and keep best.
+            // Sort by total candidate cost: codec payload bytes plus the *actual* deduplicated
+            // multi-block dictionary section bytes (one entry per unique plan in the plan table,
+            // plus a bit-packed per-block index stream). The previous estimate used
+            // `4 + 4 + N * 9` — the worst case where every block carries a distinct
+            // (kind, period, head) tuple. The deduplicated form is what we actually write to
+            // disk, so it must be what we compare against.
             results.sort_by_key(|result| {
-                result.payload.len()
-                    + 4
-                    + 4
-                    + result.plans.len() * RECURSIVE_BLOCK_PLAN_BYTES
+                let plan = MultiBlockPlan {
+                    block_size: result.block_size,
+                    plans: result.plans.clone(),
+                };
+                result.payload.len() + multi_block_section_size(&plan)
             });
             results.into_iter().next()
         }
@@ -451,8 +457,11 @@ fn build_recursive_circuit_stream(
     let single_template_total =
         transformed_template.payload.len();
     let multi_block_winner = multi_block_candidate.as_ref().and_then(|mb| {
-        let mb_total =
-            mb.payload.len() + 4 + 4 + mb.plans.len() * RECURSIVE_BLOCK_PLAN_BYTES;
+        let plan = MultiBlockPlan {
+            block_size: mb.block_size,
+            plans: mb.plans.clone(),
+        };
+        let mb_total = mb.payload.len() + multi_block_section_size(&plan);
         if mb_total < single_template_total {
             Some(mb)
         } else {
@@ -464,10 +473,13 @@ fn build_recursive_circuit_stream(
         eprintln!(
             "zbit-trace recursive template-pick single={} multi-block={:?} winner={}",
             single_template_total,
-            multi_block_candidate.as_ref().map(|mb| mb.payload.len()
-                + 4
-                + 4
-                + mb.plans.len() * RECURSIVE_BLOCK_PLAN_BYTES),
+            multi_block_candidate.as_ref().map(|mb| {
+                let plan = MultiBlockPlan {
+                    block_size: mb.block_size,
+                    plans: mb.plans.clone(),
+                };
+                mb.payload.len() + multi_block_section_size(&plan)
+            }),
             if multi_block_winner.is_some() {
                 "multi-block"
             } else {
@@ -608,7 +620,6 @@ const RECURSIVE_TOPOLOGY_MULTI_BLOCK_FLAG: u16 = 0x8000;
 // padding cleanly. Legacy fixed-width dictionaries (flag clear) decode unchanged.
 const RECURSIVE_TOPOLOGY_COMPACT_FLAG: u16 = 0x4000;
 const RECURSIVE_TOPOLOGY_COUNT_MASK: u16 = 0x3FFF;
-const RECURSIVE_BLOCK_PLAN_BYTES: usize = 1 + 4 + 4;
 
 const COMPACT_TOPOLOGY_KIND_INDEX_BITS: u32 = 6;
 const COMPACT_TOPOLOGY_ORDER_BITS: u32 = 2;
@@ -734,24 +745,46 @@ fn recursive_circuit_fixed_section_size(stream: &RecursiveCircuitStream) -> usiz
         + 2 /* topology_field u16 */
 }
 
-// Multi-block plan dictionary — a real first step toward the Circuit Atlas. Instead of
-// repeating `(kind, period, head)` for every one of N blocks, we deduplicate the unique
-// plans into a small per-pack table at the head of the trailer and per-block we store
-// only an index into that table. The index uses `bits_for_index(plan_table_len)` bits
-// (1 bit for two unique plans, 2 bits for 3-4, etc.), so when every block picks the same
-// plan the per-block cost collapses to one bit per block instead of ~5 bytes.
+// Multi-block plan dictionary — the whole trailer is **one continuous bit stream** with
+// every field sized to exactly the bits its value or context requires. No byte alignment
+// between fields, no varint continuation overhead. A `block_size` of 1024 takes 11 bits
+// (10 value bits plus a 1-bit width-prefix tag) plus its 5-bit width header for the
+// width-prefixed fields; a 6-bit kind index takes 6 bits; the per-block plan selector
+// takes `ceil(log2(plan_table_len))` bits each, which is **zero** when every block
+// picks the same plan. The decoder peels the stream by sequential `read_bits` calls.
 //
-// Wire layout:
-//   varint block_count        — number of blocks in the trailer
-//   varint block_size         — common non-last block size
-//   varint plan_table_len     — number of distinct plans (1..=block_count)
-//   per plan in the table:
-//     kind_index u8            (6 bits used via kind_to_compact_index)
-//     varint period
-//     varint head
-//   bit-stream:
-//     for each block: plan_index in `bits_for_index(plan_table_len)` bits, MSB-first
-//   padding bits up to the next byte boundary
+// Wire layout (single bit stream, MSB-first within each field):
+//
+//   block_count           in 4 bits                              (capped at 15)
+//   block_size_width      in 5 bits                              (0..31, fits any u32 ≤ 2^31)
+//   block_size            in block_size_width bits
+//   plan_table_len_m1     in `bits_for_index(block_count)` bits  (table_len = m1 + 1)
+//
+//   for each plan in the table:
+//     kind_index          in 6 bits                              (49 active kinds map into 0..63)
+//
+//   period_width          in 5 bits                              (max width across all periods)
+//   for each plan: period in period_width bits
+//
+//   head_width            in 5 bits                              (max width across all heads)
+//   for each plan: head   in head_width bits
+//
+//   for each block:
+//     plan_idx            in `bits_for_index(plan_table_len)` bits   (0 bits when table_len=1)
+//
+//   padding to the next byte boundary
+//
+// The "width" headers are the bit-shifting analogue of varint: spend 5 bits once to
+// declare a per-group max, then pack every value in that group at exactly that width.
+// On the cat split=2 trailer this brings the trailer from 15 B (varint flat) down to
+// 12 B; on cat split=4 from 19 B down to 18 B. The savings on shipped packs are zero —
+// cat single-plan always wins — but the format is now genuinely "only the bits needed".
+const MULTI_BLOCK_COUNT_BITS: u32 = 4;
+const MULTI_BLOCK_WIDTH_HEADER_BITS: u32 = 5;
+const MULTI_BLOCK_KIND_INDEX_BITS: u32 = 6;
+const MULTI_BLOCK_MAX_BLOCKS: usize = (1 << MULTI_BLOCK_COUNT_BITS) - 1;
+const MULTI_BLOCK_MAX_FIELD_WIDTH: u32 = (1 << MULTI_BLOCK_WIDTH_HEADER_BITS) - 1;
+
 fn multi_block_unique_plans(plan: &MultiBlockPlan) -> Vec<CircuitTransformPlan> {
     let mut unique: Vec<CircuitTransformPlan> = Vec::with_capacity(plan.plans.len());
     for entry in &plan.plans {
@@ -762,24 +795,286 @@ fn multi_block_unique_plans(plan: &MultiBlockPlan) -> Vec<CircuitTransformPlan> 
     unique
 }
 
-fn multi_block_index_bits(plan_table_len: usize) -> u32 {
-    bits_for_index(plan_table_len.max(1))
+/// Width in bits required to represent a value of magnitude `value` (0 → 0 bits, 1 → 1
+/// bit, 1024 → 11 bits, etc.). This is exactly the `bits_for_index(value + 1)` formula
+/// applied to a single field rather than to a range size, which is what we need when a
+/// field carries an unbounded magnitude (block_size, period, head) rather than an index
+/// into a known set.
+fn bits_for_value(value: u64) -> u32 {
+    if value == 0 {
+        return 0;
+    }
+    let mut bits = 0u32;
+    let mut v = value;
+    while v > 0 {
+        bits += 1;
+        v >>= 1;
+    }
+    bits
+}
+
+/// Width in bits needed to encode each entry of a fixed-width group whose maximum value
+/// is `max_value`. Same as `bits_for_value` but named for the per-group case.
+fn group_field_width(max_value: u64) -> u32 {
+    bits_for_value(max_value)
+}
+
+/// Pre-computes the per-group widths used by both the size formula and the writer/reader.
+fn multi_block_layout(plan: &MultiBlockPlan) -> MultiBlockLayout {
+    let unique = multi_block_unique_plans(plan);
+    let block_size_width = bits_for_value(plan.block_size as u64);
+    let max_period = unique.iter().map(|p| p.period as u64).max().unwrap_or(0);
+    let max_head = unique.iter().map(|p| p.head as u64).max().unwrap_or(0);
+    let period_width = group_field_width(max_period);
+    let head_width = group_field_width(max_head);
+    MultiBlockLayout {
+        unique,
+        block_size_width,
+        period_width,
+        head_width,
+    }
+}
+
+struct MultiBlockLayout {
+    unique: Vec<CircuitTransformPlan>,
+    block_size_width: u32,
+    period_width: u32,
+    head_width: u32,
+}
+
+fn multi_block_trailer_bit_len(plan: &MultiBlockPlan, layout: &MultiBlockLayout) -> usize {
+    let block_count = plan.plans.len();
+    let table_len = layout.unique.len();
+    let mut bits = MULTI_BLOCK_COUNT_BITS as usize;
+    bits += MULTI_BLOCK_WIDTH_HEADER_BITS as usize + layout.block_size_width as usize;
+    // plan_table_len_m1 in bits_for_index(block_count) bits — block_count=1 needs 0 bits,
+    // block_count=2 needs 1 bit, etc.
+    bits += bits_for_index(block_count) as usize;
+    bits += MULTI_BLOCK_KIND_INDEX_BITS as usize * table_len;
+    bits += MULTI_BLOCK_WIDTH_HEADER_BITS as usize + layout.period_width as usize * table_len;
+    bits += MULTI_BLOCK_WIDTH_HEADER_BITS as usize + layout.head_width as usize * table_len;
+    let per_block_bits = bits_for_index(table_len) as usize;
+    bits += per_block_bits * block_count;
+    bits
 }
 
 fn multi_block_section_size(plan: &MultiBlockPlan) -> usize {
-    let unique = multi_block_unique_plans(plan);
-    let mut size = varint_u64_len(plan.plans.len() as u64)
-        + varint_u64_len(plan.block_size as u64)
-        + varint_u64_len(unique.len() as u64);
-    for entry in &unique {
-        size += 1 /* kind_index byte */
-            + varint_u64_len(entry.period as u64)
-            + varint_u64_len(entry.head as u64);
+    let layout = multi_block_layout(plan);
+    let bits = multi_block_trailer_bit_len(plan, &layout);
+    (bits + 7) / 8
+}
+
+fn write_multi_block_section(out: &mut Vec<u8>, mb: &MultiBlockPlan) {
+    let layout = multi_block_layout(mb);
+    let block_count = mb.plans.len();
+    let table_len = layout.unique.len();
+
+    debug_assert!(
+        block_count <= MULTI_BLOCK_MAX_BLOCKS,
+        "multi-block trailer assumes block_count <= {MULTI_BLOCK_MAX_BLOCKS} \
+         (the profile multi_block_split_counts() values stay well under this)",
+    );
+    debug_assert!(
+        layout.block_size_width <= MULTI_BLOCK_MAX_FIELD_WIDTH
+            && layout.period_width <= MULTI_BLOCK_MAX_FIELD_WIDTH
+            && layout.head_width <= MULTI_BLOCK_MAX_FIELD_WIDTH,
+        "multi-block trailer width header is 5 bits; no field may need more than 31 bits",
+    );
+
+    let total_bits = multi_block_trailer_bit_len(mb, &layout);
+    let mut bw = BitWriter::with_capacity((total_bits + 7) / 8);
+
+    bw.write_bits(block_count as u64, MULTI_BLOCK_COUNT_BITS);
+    bw.write_bits(layout.block_size_width as u64, MULTI_BLOCK_WIDTH_HEADER_BITS);
+    if layout.block_size_width > 0 {
+        bw.write_bits(mb.block_size as u64, layout.block_size_width);
     }
-    let bit_width = multi_block_index_bits(unique.len()) as usize;
-    let bit_len = bit_width * plan.plans.len();
-    size += (bit_len + 7) / 8;
-    size
+
+    let table_len_bits = bits_for_index(block_count);
+    if table_len_bits > 0 {
+        // We encode (table_len - 1) so the value 0 is reachable when block_count == 1.
+        bw.write_bits((table_len - 1) as u64, table_len_bits);
+    }
+
+    for plan in &layout.unique {
+        let kind_u8 = plan.kind.as_u8();
+        let kind_index = kind_to_compact_index(kind_u8).unwrap_or(kind_u8 & 0x3F);
+        bw.write_bits(kind_index as u64, MULTI_BLOCK_KIND_INDEX_BITS);
+    }
+
+    bw.write_bits(layout.period_width as u64, MULTI_BLOCK_WIDTH_HEADER_BITS);
+    if layout.period_width > 0 {
+        for plan in &layout.unique {
+            bw.write_bits(plan.period as u64, layout.period_width);
+        }
+    }
+
+    bw.write_bits(layout.head_width as u64, MULTI_BLOCK_WIDTH_HEADER_BITS);
+    if layout.head_width > 0 {
+        for plan in &layout.unique {
+            bw.write_bits(plan.head as u64, layout.head_width);
+        }
+    }
+
+    let per_block_bits = bits_for_index(table_len);
+    if per_block_bits > 0 {
+        for plan in &mb.plans {
+            let idx = layout
+                .unique
+                .iter()
+                .position(|existing| existing == plan)
+                .expect("multi_block_unique_plans was built from these same plans");
+            bw.write_bits(idx as u64, per_block_bits);
+        }
+    }
+
+    debug_assert_eq!(
+        bw.bit_len(),
+        total_bits,
+        "writer must consume exactly the bits the size formula predicted",
+    );
+    out.extend_from_slice(&bw.into_bytes());
+}
+
+fn read_multi_block_section(
+    dict_bytes: &[u8],
+    cursor: &mut usize,
+) -> ZbitResult<(u32, Vec<CircuitTransformPlan>)> {
+    // Hand the BitReader the rest of the dictionary; we track exactly how many bits we
+    // consume and advance `cursor` by the matching byte count (rounded up to clear the
+    // trailing padding bits cleanly).
+    let bit_buf = dict_bytes
+        .get(*cursor..)
+        .ok_or_else(|| ZbitError::Parse("multi-block trailer range out of bounds".to_string()))?;
+    let mut br = BitReader::new(bit_buf);
+
+    let block_count = br.read_bits(MULTI_BLOCK_COUNT_BITS)? as usize;
+    if block_count == 0 {
+        return Err(ZbitError::Parse(
+            "multi-block trailer claims zero blocks".to_string(),
+        ));
+    }
+
+    let block_size_width = br.read_bits(MULTI_BLOCK_WIDTH_HEADER_BITS)? as u32;
+    if block_size_width > MULTI_BLOCK_MAX_FIELD_WIDTH {
+        return Err(ZbitError::Parse(format!(
+            "multi-block trailer block_size_width {block_size_width} out of range",
+        )));
+    }
+    let block_size = if block_size_width == 0 {
+        0u32
+    } else {
+        let raw = br.read_bits(block_size_width)?;
+        if raw > u32::MAX as u64 {
+            return Err(ZbitError::Parse(
+                "multi-block trailer block_size exceeds u32".to_string(),
+            ));
+        }
+        raw as u32
+    };
+    if block_size == 0 {
+        return Err(ZbitError::Parse(
+            "multi-block trailer block_size is zero".to_string(),
+        ));
+    }
+
+    let table_len_bits = bits_for_index(block_count);
+    let table_len_m1 = if table_len_bits == 0 {
+        0u64
+    } else {
+        br.read_bits(table_len_bits)?
+    };
+    let table_len = (table_len_m1 + 1) as usize;
+    if table_len == 0 || table_len > block_count {
+        return Err(ZbitError::Parse(format!(
+            "multi-block trailer plan table size {table_len} is invalid (must be 1..={block_count})",
+        )));
+    }
+
+    let mut kinds: Vec<CircuitTransformKind> = Vec::with_capacity(table_len);
+    for _ in 0..table_len {
+        let kind_index = br.read_bits(MULTI_BLOCK_KIND_INDEX_BITS)? as u8;
+        let kind_u8 = compact_index_to_kind(kind_index).ok_or_else(|| {
+            ZbitError::Parse(format!(
+                "multi-block trailer invalid kind index {kind_index}",
+            ))
+        })?;
+        let kind = CircuitTransformKind::from_u8(kind_u8).ok_or_else(|| {
+            ZbitError::Parse("multi-block trailer invalid transform kind".to_string())
+        })?;
+        kinds.push(kind);
+    }
+
+    let period_width = br.read_bits(MULTI_BLOCK_WIDTH_HEADER_BITS)? as u32;
+    if period_width > MULTI_BLOCK_MAX_FIELD_WIDTH {
+        return Err(ZbitError::Parse(format!(
+            "multi-block trailer period_width {period_width} out of range",
+        )));
+    }
+    let mut periods: Vec<u32> = Vec::with_capacity(table_len);
+    for _ in 0..table_len {
+        let period = if period_width == 0 {
+            0u64
+        } else {
+            br.read_bits(period_width)?
+        };
+        if period > u32::MAX as u64 {
+            return Err(ZbitError::Parse(
+                "multi-block trailer period exceeds u32".to_string(),
+            ));
+        }
+        periods.push(period as u32);
+    }
+
+    let head_width = br.read_bits(MULTI_BLOCK_WIDTH_HEADER_BITS)? as u32;
+    if head_width > MULTI_BLOCK_MAX_FIELD_WIDTH {
+        return Err(ZbitError::Parse(format!(
+            "multi-block trailer head_width {head_width} out of range",
+        )));
+    }
+    let mut heads: Vec<u32> = Vec::with_capacity(table_len);
+    for _ in 0..table_len {
+        let head = if head_width == 0 {
+            0u64
+        } else {
+            br.read_bits(head_width)?
+        };
+        if head > u32::MAX as u64 {
+            return Err(ZbitError::Parse(
+                "multi-block trailer head exceeds u32".to_string(),
+            ));
+        }
+        heads.push(head as u32);
+    }
+
+    let plan_table: Vec<CircuitTransformPlan> = kinds
+        .into_iter()
+        .zip(periods.into_iter())
+        .zip(heads.into_iter())
+        .map(|((kind, period), head)| CircuitTransformPlan { kind, period, head })
+        .collect();
+
+    let per_block_bits = bits_for_index(table_len);
+    let mut block_plans: Vec<CircuitTransformPlan> = Vec::with_capacity(block_count);
+    if per_block_bits == 0 {
+        for _ in 0..block_count {
+            block_plans.push(plan_table[0]);
+        }
+    } else {
+        for _ in 0..block_count {
+            let idx = br.read_bits(per_block_bits)? as usize;
+            if idx >= table_len {
+                return Err(ZbitError::Parse(format!(
+                    "multi-block trailer plan index {idx} exceeds table {table_len}",
+                )));
+            }
+            block_plans.push(plan_table[idx]);
+        }
+    }
+
+    let consumed_bits = br.bit_pos();
+    *cursor += (consumed_bits + 7) / 8;
+    Ok((block_size, block_plans))
 }
 
 fn recursive_circuit_dictionary_size(stream: &RecursiveCircuitStream) -> usize {
@@ -873,34 +1168,7 @@ fn write_recursive_circuit_dictionary(out: &mut Vec<u8>, stream: &RecursiveCircu
         }
     }
     if let Some(mb) = &stream.multi_block {
-        push_varint_u64(out, mb.plans.len() as u64);
-        push_varint_u64(out, mb.block_size as u64);
-        let unique = multi_block_unique_plans(mb);
-        push_varint_u64(out, unique.len() as u64);
-        for plan in &unique {
-            // Plan table — written once per pack regardless of how many blocks reference
-            // each plan. This is the atlas-style dedup: repeated circuits no longer cost
-            // bytes per occurrence, just one bit-width-sized index per block.
-            let kind_u8 = plan.kind.as_u8();
-            let kind_index = kind_to_compact_index(kind_u8).unwrap_or(kind_u8 & 0x3F);
-            out.push(kind_index);
-            push_varint_u64(out, plan.period as u64);
-            push_varint_u64(out, plan.head as u64);
-        }
-        // Per-block plan index bit stream. Index width is exactly
-        // ceil(log2(unique.len())) — 0 bits if only one unique plan, 1 bit for two, etc.
-        let bit_width = multi_block_index_bits(unique.len());
-        if bit_width > 0 {
-            let mut bw = BitWriter::with_capacity(((bit_width as usize) * mb.plans.len() + 7) / 8);
-            for plan in &mb.plans {
-                let idx = unique
-                    .iter()
-                    .position(|existing| existing == plan)
-                    .expect("multi_block_unique_plans was built from these same plans");
-                bw.write_bits(idx as u64, bit_width);
-            }
-            out.extend_from_slice(&bw.into_bytes());
-        }
+        write_multi_block_section(out, mb);
     }
 }
 
@@ -1155,76 +1423,9 @@ fn decode_recursive_circuit_payload(
     let mut block_plans: Vec<CircuitTransformPlan> = Vec::new();
     let mut block_size_field = 0u32;
     if multi_block_present {
-        let block_count = read_varint_u64(dict_bytes, &mut dict_cursor)? as usize;
-        block_size_field = read_varint_u64(dict_bytes, &mut dict_cursor)? as u32;
-        if block_count == 0 {
-            return Err(ZbitError::Parse(
-                "recursive-circuit-xz multi-block extension claims zero blocks".to_string(),
-            ));
-        }
-        if block_size_field == 0 {
-            return Err(ZbitError::Parse(
-                "recursive-circuit-xz multi-block extension has zero block size".to_string(),
-            ));
-        }
-        // Plan dictionary: each unique transform plan appears once. Per-block we read a
-        // tiny index into this table from a bit stream — that is the actual "classic
-        // dictionary compression through repeated circuits" the format now does, applied
-        // at the multi-block level.
-        let plan_table_len = read_varint_u64(dict_bytes, &mut dict_cursor)? as usize;
-        if plan_table_len == 0 || plan_table_len > block_count {
-            return Err(ZbitError::Parse(format!(
-                "recursive-circuit-xz multi-block plan table size {plan_table_len} is \
-                 invalid (must be 1..={block_count})"
-            )));
-        }
-        let mut plan_table: Vec<CircuitTransformPlan> = Vec::with_capacity(plan_table_len);
-        for _ in 0..plan_table_len {
-            let kind_index = read_u8(dict_bytes, &mut dict_cursor)?;
-            let kind_u8 = compact_index_to_kind(kind_index).ok_or_else(|| {
-                ZbitError::Parse(format!(
-                    "recursive-circuit-xz multi-block plan has invalid kind index {kind_index}"
-                ))
-            })?;
-            let kind = CircuitTransformKind::from_u8(kind_u8).ok_or_else(|| {
-                ZbitError::Parse(
-                    "recursive-circuit-xz multi-block plan has invalid transform kind".to_string(),
-                )
-            })?;
-            let period = read_varint_u64(dict_bytes, &mut dict_cursor)? as u32;
-            let head = read_varint_u64(dict_bytes, &mut dict_cursor)? as u32;
-            plan_table.push(CircuitTransformPlan { kind, period, head });
-        }
-        let bit_width = multi_block_index_bits(plan_table_len);
-        block_plans.reserve(block_count);
-        if bit_width == 0 {
-            // All blocks point at the single plan — no per-block index bits on the wire.
-            for _ in 0..block_count {
-                block_plans.push(plan_table[0]);
-            }
-        } else {
-            let bit_len = (bit_width as usize) * block_count;
-            let bit_bytes = (bit_len + 7) / 8;
-            let bit_buf = dict_bytes
-                .get(dict_cursor..dict_cursor + bit_bytes)
-                .ok_or_else(|| {
-                    ZbitError::Parse(
-                        "recursive-circuit-xz multi-block index bit stream out of bounds"
-                            .to_string(),
-                    )
-                })?;
-            let mut br = BitReader::new(bit_buf);
-            for _ in 0..block_count {
-                let idx = br.read_bits(bit_width)? as usize;
-                if idx >= plan_table_len {
-                    return Err(ZbitError::Parse(format!(
-                        "recursive-circuit-xz multi-block plan index {idx} exceeds table {plan_table_len}"
-                    )));
-                }
-                block_plans.push(plan_table[idx]);
-            }
-            dict_cursor += bit_bytes;
-        }
+        let (block_size, plans) = read_multi_block_section(dict_bytes, &mut dict_cursor)?;
+        block_size_field = block_size;
+        block_plans = plans;
     }
 
     if dict_cursor != dict_bytes.len() {
