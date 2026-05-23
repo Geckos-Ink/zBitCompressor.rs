@@ -148,7 +148,9 @@ fn invert_periodic_gather(data: &[u8], original_len: usize, period: usize) -> Op
 }
 
 fn apply_periodic_delta(data: &[u8], period: usize) -> Option<Vec<u8>> {
-    if period < 2 || period > data.len() {
+    // period == 1 collapses to ordinary unary delta over the input; allowing it lets
+    // head-tail-tail-delta and similar composites express "delta-1 on the tail".
+    if period < 1 || period > data.len() {
         return None;
     }
     let mut out = data.to_vec();
@@ -159,7 +161,7 @@ fn apply_periodic_delta(data: &[u8], period: usize) -> Option<Vec<u8>> {
 }
 
 fn invert_periodic_delta(data: &[u8], period: usize) -> Option<Vec<u8>> {
-    if period < 2 || period > data.len() {
+    if period < 1 || period > data.len() {
         return None;
     }
     let mut out = data.to_vec();
@@ -170,7 +172,7 @@ fn invert_periodic_delta(data: &[u8], period: usize) -> Option<Vec<u8>> {
 }
 
 fn apply_periodic_xor(data: &[u8], period: usize) -> Option<Vec<u8>> {
-    if period < 2 || period > data.len() {
+    if period < 1 || period > data.len() {
         return None;
     }
     let mut out = data.to_vec();
@@ -181,7 +183,7 @@ fn apply_periodic_xor(data: &[u8], period: usize) -> Option<Vec<u8>> {
 }
 
 fn invert_periodic_xor(data: &[u8], period: usize) -> Option<Vec<u8>> {
-    if period < 2 || period > data.len() {
+    if period < 1 || period > data.len() {
         return None;
     }
     let mut out = data.to_vec();
@@ -617,8 +619,25 @@ fn score_periodic_candidates(data: &[u8], max_period: usize, top_k: usize) -> Ve
     }
 
     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-    scored.truncate(top_k);
-    scored.into_iter().map(|(p, _)| p).collect()
+
+    // Dedup nearby periods: consecutive sampling tends to pick the true period plus several
+    // neighbours (e.g. 6397, 6401, 6405 for a stride near 6401). The neighbours produce nearly
+    // identical transformed payloads, so they waste expensive plan evaluation. Keep only periods
+    // that differ from every already-kept period by at least 8.
+    let mut kept = Vec::<usize>::with_capacity(top_k);
+    for (period, _) in scored {
+        if kept.len() >= top_k {
+            break;
+        }
+        if kept
+            .iter()
+            .any(|&existing| existing.abs_diff(period) < 8)
+        {
+            continue;
+        }
+        kept.push(period);
+    }
+    kept
 }
 
 const TOPOLOGY_HASH_OFFSET: u64 = 0xcbf29ce484222325;
@@ -976,7 +995,7 @@ fn choose_adaptive_transform_plan(
                 });
             }
         }
-        let mut tail_delta_periods = vec![2u32, 4, 8, 16];
+        let mut tail_delta_periods = vec![1u32, 2, 4, 8, 16];
         let full_tail_period = period_u32.saturating_sub(1);
         if full_tail_period >= 2 {
             tail_delta_periods.push(full_tail_period);
@@ -989,7 +1008,8 @@ fn choose_adaptive_transform_plan(
         tail_delta_periods.dedup();
 
         for tail_delta_period in tail_delta_periods {
-            if (period_u32.saturating_sub(1)) >= tail_delta_period && tail_delta_period >= 2 {
+            // tail_delta_period == 1 means a plain unary delta/xor over the tail (no period).
+            if (period_u32.saturating_sub(1)) >= tail_delta_period && tail_delta_period >= 1 {
                 add_plan(CircuitTransformPlan {
                     kind: CircuitTransformKind::PeriodicHeadTailTailDelta,
                     period: period_u32,
@@ -1089,7 +1109,7 @@ fn choose_adaptive_transform_plan(
         }
         if idx == 0 {
             let period_u32 = period as u32;
-            let mut forced_tail_heads = vec![4u32];
+            let mut forced_tail_heads = vec![1u32, 4u32];
             let full_tail = period_u32.saturating_sub(1);
             if full_tail >= 2 {
                 forced_tail_heads.push(full_tail);
@@ -1120,6 +1140,7 @@ fn choose_adaptive_transform_plan(
                     CircuitTransformKind::PeriodicHeadTailTailDelta,
                     CircuitTransformKind::PeriodicHeadTailTailXor,
                     CircuitTransformKind::PeriodicHeadTailTailGather,
+                    CircuitTransformKind::PeriodicHeadTailTailGatherDelta,
                 ] {
                     let forced = CircuitTransformPlan {
                         kind: forced_kind,
@@ -1173,7 +1194,12 @@ fn choose_adaptive_transform_plan(
 
     let trace_recursive = std::env::var_os("ZBIT_TRACE_RECURSIVE").is_some();
     let eval_timer = Instant::now();
-    let eval_results = selected
+
+    // Phase A: apply each selected plan to the full data and score with a quick XZ encode.
+    // A low-preset XZ ranks similarly to the eventual XZ-extreme winner because they share
+    // the same LZMA2 / arithmetic coding tail, so this preserves ratio while being much cheaper
+    // than running choose_best_codec (~6 XZ-9 encodes) on every plan.
+    let quick_full_scored = selected
         .iter()
         .copied()
         .enumerate()
@@ -1183,6 +1209,40 @@ fn choose_adaptive_transform_plan(
             let Some(transformed) = apply_transform_plan(data, &plan) else {
                 return Ok::<_, ZbitError>(None);
             };
+            let quick_len = xz_encode_easy_preset(&transformed, 3)?.len();
+            Ok::<_, ZbitError>(Some((rank, plan, transformed, quick_len)))
+        })
+        .collect::<ZbitResult<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+    if trace_recursive {
+        for (rank, plan, _, quick_len) in &quick_full_scored {
+            eprintln!(
+                "zbit-trace plan-quick-score rank={} kind={} period={} head={} quick-xz3={}",
+                rank,
+                plan.kind.name(),
+                plan.period,
+                plan.head,
+                quick_len,
+            );
+        }
+    }
+
+    // Phase B: only run the expensive choose_best_codec on the top-K plans by quick score.
+    // For balanced profile this cuts ~8 plans down to ~5, saving a large constant factor while
+    // keeping enough headroom that the eventual winner is rarely dropped by the quick scorer.
+    let full_eval_budget = profile.full_eval_transform_plans().min(quick_full_scored.len()).max(1);
+    let mut quick_sorted = quick_full_scored;
+    quick_sorted.sort_unstable_by_key(|(rank, _, _, quick_len)| (*quick_len, *rank));
+    let mut top_plans = quick_sorted.into_iter().take(full_eval_budget).collect::<Vec<_>>();
+    // Always keep the original best-by-quick-score plan first so its rank ordering is preserved
+    top_plans.sort_unstable_by_key(|(rank, _, _, _)| *rank);
+
+    let eval_results = top_plans
+        .into_par_iter()
+        .map(|(rank, plan, transformed, _quick_len)| {
             let (codec, final_payload) = choose_best_codec(&transformed, true, false, profile)?;
             if trace_recursive {
                 eprintln!(
@@ -1194,7 +1254,7 @@ fn choose_adaptive_transform_plan(
                     codec.name()
                 );
             }
-            Ok(Some((rank, plan, transformed, codec, final_payload)))
+            Ok::<_, ZbitError>(Some((rank, plan, transformed, codec, final_payload)))
         })
         .collect::<ZbitResult<Vec<_>>>()?
         .into_iter()

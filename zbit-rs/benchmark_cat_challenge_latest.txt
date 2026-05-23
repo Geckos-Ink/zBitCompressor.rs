@@ -1,7 +1,7 @@
 zBit-rs Real File Benchmark Report
-Generated: 2026-05-07 21:04:42
-Input file: /home/riccardo/Sources/GitHub/zBitCompressor.rs/assets/cat_challenge.png
-Compressed artifact: /home/riccardo/Sources/GitHub/zBitCompressor.rs/zbit-rs/benchmark_cat_challenge.zbpk
+Generated: 2026-05-23 00:18:36
+Input file: assets/cat_challenge.png
+Compressed artifact: /tmp/cat.zbpk
 
 Active profile: balanced
 Selected method: recursive-circuit-xz
@@ -27,23 +27,23 @@ Compressed size (bytes): 2670718
 Compression ratio (compressed/original): 0.899412
 Space savings (%): 10.06
 
-Compression time (ms): 108496.503
-Decompression time (ms): 9706.870
-Compression throughput (MiB/s): 0.026
-Decompression throughput (MiB/s): 0.292
+Compression time (ms): 60335.199
+Decompression time (ms): 517.834
+Compression throughput (MiB/s): 0.047
+Decompression throughput (MiB/s): 5.469
 
 Candidate timing breakdown (ms):
-- index stream build: 523.342
-- huffman stream build: 627.145
-- raw-deflate encode: 537.623
-- raw-zstd encode: 735.845
-- raw-xz encode: 872.606
-- framed extraction: 4048.156
-- recursive preflate search: 40793.223
-- recursive transform sampling: 863.707
-- recursive transform evaluation: 44990.409
-- recursive correction modeling: 7200.822
-- recursive total: 100769.095
+- index stream build: 79.568
+- huffman stream build: 86.584
+- raw-deflate encode: 58.932
+- raw-zstd encode: 205.083
+- raw-xz encode: 1320.612
+- framed extraction: 217.117
+- recursive preflate search: 1503.687
+- recursive transform sampling: 187.837
+- recursive transform evaluation: 38908.832
+- recursive correction modeling: 1615.287
+- recursive total: 58354.692
 - candidate validation: 0.000
 
 Cache stats:
@@ -52,12 +52,12 @@ Cache stats:
 - stream-range hits/misses: 0/0
 
 Resource usage (KiB):
-- RSS before compression: 5836
-- RSS after compression: 429748
-- RSS after decompression: 472280
-- Compression RSS delta: 423912
-- Decompression RSS delta: 42532
-- Peak RSS (VmHWM): 3358924
+- RSS before compression: n/a
+- RSS after compression: n/a
+- RSS after decompression: n/a
+- Compression RSS delta: n/a
+- Decompression RSS delta: n/a
+- Peak RSS (VmHWM): n/a
 
 Unique symbols: 256
 Bits per symbol index: 0

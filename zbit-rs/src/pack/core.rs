@@ -79,6 +79,19 @@ impl CompressionProfile {
         }
     }
 
+    fn full_eval_transform_plans(self) -> usize {
+        // Number of plans that receive the expensive choose_best_codec evaluation.
+        // The rest are scored only with a quick XZ-3 pass and dropped.
+        // XZ-3 ranks XZ-9 winners reliably for our payloads (same LZMA family); we still
+        // keep a head margin to recover from the occasional rank swap.
+        match self {
+            Self::Fast => 1,
+            Self::Balanced => 2,
+            Self::Deep => 4,
+            Self::Research => 8,
+        }
+    }
+
     fn correction_transform_plan_budget(self) -> usize {
         match self {
             Self::Fast => 4,

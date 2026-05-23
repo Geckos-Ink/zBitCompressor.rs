@@ -1,10 +1,10 @@
 zBit-rs Cat Challenge Stream Multilevel Benchmark Report
-Generated: 2026-05-14 05:31:05 UTC
+Generated: 2026-05-23 00:30:11 UTC
 Input file: /Users/riccardo/Sources/GitHub/zBitCompressor.rs/assets/cat_challenge.png
 
 | Profile | Ratio | Savings | Orig | Comp | Comp ms | Decomp ms | Comp MiB/s | Decomp MiB/s | Comp RSS Δ KiB | Decomp RSS Δ KiB | Peak RSS KiB | Validation | Resume |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| realtime-fast | 0.999011 | 0.10% | 2969404 | 2966468 | 1444.139 | 6.678 | 1.961 | 424.027 | n/a | n/a | n/a | PASS | PASS |
-| realtime-balanced | 0.998602 | 0.14% | 2969404 | 2965252 | 3807.462 | 5.926 | 0.744 | 477.841 | n/a | n/a | n/a | PASS | PASS |
-| realtime-deep | 0.899455 | 10.05% | 2969404 | 2670846 | 280198.816 | 8386.378 | 0.010 | 0.338 | n/a | n/a | n/a | PASS | PASS |
-| wide-overfit | 0.899455 | 10.05% | 2969404 | 2670846 | 257437.597 | 8496.314 | 0.011 | 0.333 | n/a | n/a | n/a | PASS | PASS |
+| realtime-fast | 0.999011 | 0.10% | 2969404 | 2966468 | 1021.660 | 6.007 | 2.772 | 471.450 | n/a | n/a | n/a | PASS | PASS |
+| realtime-balanced | 0.998602 | 0.14% | 2969404 | 2965252 | 3501.634 | 6.831 | 0.809 | 414.583 | n/a | n/a | n/a | PASS | PASS |
+| realtime-deep | 0.899455 | 10.05% | 2969404 | 2670846 | 193723.466 | 8251.937 | 0.015 | 0.343 | n/a | n/a | n/a | PASS | PASS |
+| wide-overfit | 0.899455 | 10.05% | 2969404 | 2670846 | 302112.453 | 10152.587 | 0.009 | 0.279 | n/a | n/a | n/a | PASS | PASS |

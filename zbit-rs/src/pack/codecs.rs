@@ -505,6 +505,10 @@ struct XzTuningParams {
     match_finder: MatchFinder,
     mode: Mode,
     depth: u32,
+    // 0 disables the BCJ-style delta pre-filter; 1..=256 prepends a delta filter with that
+    // distance ahead of LZMA2. Useful for byte-aligned structured payloads (channel-interleaved
+    // images, fixed-stride binary tables) where same-stride bytes are highly correlated.
+    delta_dist: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -538,6 +542,10 @@ fn xz_encode_with_tuning(
     options.depth(tuning.depth);
 
     let mut filters = Filters::new();
+    // The xz2 binding does not currently expose the LZMA delta filter; tunings that request a
+    // delta distance fall back to plain LZMA2. When the upstream binding adds .delta(dist) we
+    // can flip this back on without further changes elsewhere in the matrix.
+    let _ = tuning.delta_dist;
     filters.lzma2(&options);
 
     let stream = Stream::new_stream_encoder(&filters, Check::None)
@@ -569,6 +577,7 @@ fn xz_encode_with_profile(
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
     )
 }
@@ -584,6 +593,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 3,
@@ -594,6 +604,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 3,
@@ -604,6 +615,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 3,
@@ -614,6 +626,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 3,
@@ -624,6 +637,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 4,
@@ -634,6 +648,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 2,
@@ -644,6 +659,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 3,
@@ -654,6 +670,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 3,
@@ -664,6 +681,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 3,
@@ -674,6 +692,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 3,
@@ -684,6 +703,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 3,
@@ -694,6 +714,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 3,
@@ -704,6 +725,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 3,
@@ -714,6 +736,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 3,
@@ -724,6 +747,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 2,
@@ -734,6 +758,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 3,
@@ -744,6 +769,7 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::HashChain4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
         },
         XzTuningParams {
             literal_context_bits: 3,
@@ -754,17 +780,80 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree3,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 0,
+        },
+        // Delta pre-filter variants: useful for fixed-stride structured payloads such as
+        // channel-interleaved image bytes (RGB=3, RGBA=4) or 16/32-bit aligned binary tables.
+        // The delta filter computes `out[i] = data[i] - data[i - dist]` byte-wise, then LZMA2
+        // compresses the residual. When the payload has that stride structure it can save
+        // several percent vs vanilla LZMA2; on structureless data it loses a small constant
+        // overhead and gets dropped by the codec winner-selection.
+        XzTuningParams {
+            literal_context_bits: 3,
+            literal_position_bits: 0,
+            position_bits: 0,
+            dict_size: 64 * 1024 * 1024,
+            nice_len: 273,
+            match_finder: MatchFinder::BinaryTree4,
+            mode: Mode::Normal,
+            depth: 0,
+            delta_dist: 4,
+        },
+        XzTuningParams {
+            literal_context_bits: 3,
+            literal_position_bits: 0,
+            position_bits: 0,
+            dict_size: 64 * 1024 * 1024,
+            nice_len: 273,
+            match_finder: MatchFinder::BinaryTree4,
+            mode: Mode::Normal,
+            depth: 0,
+            delta_dist: 3,
+        },
+        XzTuningParams {
+            literal_context_bits: 3,
+            literal_position_bits: 0,
+            position_bits: 0,
+            dict_size: 64 * 1024 * 1024,
+            nice_len: 273,
+            match_finder: MatchFinder::BinaryTree4,
+            mode: Mode::Normal,
+            depth: 0,
+            delta_dist: 2,
+        },
+        XzTuningParams {
+            literal_context_bits: 3,
+            literal_position_bits: 0,
+            position_bits: 0,
+            dict_size: 64 * 1024 * 1024,
+            nice_len: 273,
+            match_finder: MatchFinder::BinaryTree4,
+            mode: Mode::Normal,
+            depth: 0,
+            delta_dist: 1,
         },
     ]
 }
 
 fn tuned_xz_budget(profile: CompressionProfile) -> (usize, usize) {
+    // (normal_budget, extreme_budget): controls how many entries of tuned_xz_param_matrix() are
+    // probed at preset 9 and at preset 9 + extreme flag. The matrix is sorted from
+    // most-frequently-winning (no delta filter) at the top to delta-filter variants at the bottom.
+    // Keeping balanced lean trims the worst part of the recursive transform evaluation runtime
+    // while still covering the high-value tunings; delta-filter variants are sampled by the
+    // dedicated delta_xz_budget() so we can reach them without paying the full matrix cost.
     match profile {
         CompressionProfile::Fast => (3, 0),
-        CompressionProfile::Balanced => (10, 6),
-        CompressionProfile::Deep => (14, 10),
+        CompressionProfile::Balanced => (4, 3),
+        CompressionProfile::Deep => (10, 6),
         CompressionProfile::Research => (18, 14),
     }
+}
+
+fn delta_xz_budget(_profile: CompressionProfile) -> (usize, usize) {
+    // Disabled until the xz2 binding exposes the LZMA delta filter; without it, the delta-marked
+    // tuning entries would duplicate plain LZMA2 work and waste eval budget.
+    (0, 0)
 }
 
 fn build_tuned_xz_candidates(
@@ -772,7 +861,12 @@ fn build_tuned_xz_candidates(
     allow_xz_extreme: bool,
 ) -> Vec<XzCodecCandidate> {
     let (normal_budget, extreme_budget) = tuned_xz_budget(profile);
+    let (normal_delta_budget, extreme_delta_budget) = delta_xz_budget(profile);
     let tuning = tuned_xz_param_matrix();
+    let delta_first_idx = tuning
+        .iter()
+        .position(|entry| entry.delta_dist >= 1)
+        .unwrap_or(tuning.len());
 
     let mut out = Vec::new();
     let mut rank = 0usize;
@@ -785,7 +879,17 @@ fn build_tuned_xz_candidates(
     });
     rank += 1;
 
-    for params in tuning.iter().copied().take(normal_budget) {
+    for params in tuning.iter().copied().take(delta_first_idx).take(normal_budget) {
+        out.push(XzCodecCandidate {
+            rank,
+            codec: PayloadCodec::Xz,
+            preset: 9u32,
+            kind: XzCandidateKind::Tuned(params),
+        });
+        rank += 1;
+    }
+
+    for params in tuning.iter().copied().skip(delta_first_idx).take(normal_delta_budget) {
         out.push(XzCodecCandidate {
             rank,
             codec: PayloadCodec::Xz,
@@ -805,7 +909,22 @@ fn build_tuned_xz_candidates(
         });
         rank += 1;
 
-        for params in tuning.iter().copied().take(extreme_budget) {
+        for params in tuning.iter().copied().take(delta_first_idx).take(extreme_budget) {
+            out.push(XzCodecCandidate {
+                rank,
+                codec: PayloadCodec::XzExtreme,
+                preset: extreme,
+                kind: XzCandidateKind::Tuned(params),
+            });
+            rank += 1;
+        }
+
+        for params in tuning
+            .iter()
+            .copied()
+            .skip(delta_first_idx)
+            .take(extreme_delta_budget)
+        {
             out.push(XzCodecCandidate {
                 rank,
                 codec: PayloadCodec::XzExtreme,
@@ -905,18 +1024,20 @@ fn choose_best_codec(
     allow_xz_extreme: bool,
     profile: CompressionProfile,
 ) -> ZbitResult<(PayloadCodec, Vec<u8>)> {
-    let mut codec_jobs = vec![
-        (0usize, PayloadCodec::Xz, 9u32, 0u32),
-        (1usize, PayloadCodec::Xz, 9u32, 3u32),
-        (2usize, PayloadCodec::Xz, 9u32, 4u32),
-    ];
+    // Fast profile uses only the default XZ-9 path; the other profiles probe two extra
+    // position_bits variants because they occasionally save several KB on aligned payloads.
+    let mut codec_jobs = vec![(0usize, PayloadCodec::Xz, 9u32, 0u32)];
+    if !matches!(profile, CompressionProfile::Fast) {
+        codec_jobs.push((1usize, PayloadCodec::Xz, 9u32, 3u32));
+        codec_jobs.push((2usize, PayloadCodec::Xz, 9u32, 4u32));
+    }
     if allow_xz_extreme && profile.enable_xz_extreme_refinement() {
         let extreme = (1u32 << 31) | 9;
-        codec_jobs.extend([
-            (3usize, PayloadCodec::XzExtreme, extreme, 0u32),
-            (4usize, PayloadCodec::XzExtreme, extreme, 3u32),
-            (5usize, PayloadCodec::XzExtreme, extreme, 4u32),
-        ]);
+        codec_jobs.push((3usize, PayloadCodec::XzExtreme, extreme, 0u32));
+        if matches!(profile, CompressionProfile::Deep | CompressionProfile::Research) {
+            codec_jobs.push((4usize, PayloadCodec::XzExtreme, extreme, 3u32));
+            codec_jobs.push((5usize, PayloadCodec::XzExtreme, extreme, 4u32));
+        }
     }
 
     let mut candidates = codec_jobs

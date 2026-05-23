@@ -1,7 +1,7 @@
 zBit-rs Real File Benchmark Report
-Generated: 2026-05-07 22:17:56
+Generated: 2026-05-23 00:31:34
 Input file: papers/zbit-algorithmsResearch.md
-Compressed artifact: zbit-rs/benchmark_algorithmsResearch.zbpk
+Compressed artifact: /tmp/paper.zbpk
 
 Active profile: balanced
 Selected method: raw-xz
@@ -28,18 +28,18 @@ Compressed size (bytes): 20580
 Compression ratio (compressed/original): 0.331855
 Space savings (%): 66.81
 
-Compression time (ms): 313.161
-Decompression time (ms): 1.134
-Compression throughput (MiB/s): 0.189
-Decompression throughput (MiB/s): 52.148
+Compression time (ms): 122.009
+Decompression time (ms): 3.717
+Compression throughput (MiB/s): 0.485
+Decompression throughput (MiB/s): 15.913
 
 Candidate timing breakdown (ms):
-- index stream build: 8.797
-- huffman stream build: 8.526
-- raw-deflate encode: 12.935
-- raw-zstd encode: 111.240
-- raw-xz encode: 161.829
-- framed extraction: 3.966
+- index stream build: 0.812
+- huffman stream build: 1.766
+- raw-deflate encode: 3.673
+- raw-zstd encode: 32.016
+- raw-xz encode: 82.217
+- framed extraction: 0.083
 - recursive preflate search: 0.000
 - recursive transform sampling: 0.000
 - recursive transform evaluation: 0.000
@@ -53,12 +53,12 @@ Cache stats:
 - stream-range hits/misses: 0/0
 
 Resource usage (KiB):
-- RSS before compression: 3040
-- RSS after compression: 8788
-- RSS after decompression: 8832
-- Compression RSS delta: 5748
-- Decompression RSS delta: 44
-- Peak RSS (VmHWM): 409420
+- RSS before compression: n/a
+- RSS after compression: n/a
+- RSS after decompression: n/a
+- Compression RSS delta: n/a
+- Decompression RSS delta: n/a
+- Peak RSS (VmHWM): n/a
 
 Unique symbols: 114
 Bits per symbol index: 0

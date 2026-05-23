@@ -278,25 +278,27 @@ bash zbit-rs/scripts/benchmark_cat_challenge_stream_multilevel.sh
 
 ## Latest Benchmark Result Files
 
-Current snapshot (reports generated on 2026-05-07):
+Current snapshot (reports generated on 2026-05-23):
 
 ### Latest Single-Run Benchmarks
 
-| Test | Input | Selected method/profile | Original -> Compressed (bytes) | Ratio | Savings | Compression ms | Decompression ms | Peak RSS KiB | Validation |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Paper benchmark | `papers/zbit-algorithmsResearch.md` | `raw-xz` | `62015 -> 20580` | `0.331855` | `66.81%` | `313.161` | `1.134` | `409420` | `PASS` |
-| Primary binary benchmark | `assets/primary.3b.bin` | `monotonic-delta` | `3233613 -> 562836` | `0.174058` | `82.59%` | `16634.566` | `151.082` | `588248` | `PASS` |
-| Cat challenge benchmark | `assets/cat_challenge.png` | `recursive-circuit-xz` | `2969404 -> 2670718` | `0.899412` | `10.06%` | `112499.682` | `9637.900` | `3410588` | `PASS` |
-| Cat challenge stream benchmark | `assets/cat_challenge.png` | `wide-overfit stream` | `2969404 -> 2670846` | `0.899455` | `10.05%` | `115086.113` | `9613.753` | `3357636` | `PASS` |
+| Test | Input | Selected method/profile | Original -> Compressed (bytes) | Ratio | Savings | Compression ms | Decompression ms | Validation |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Paper benchmark | `papers/zbit-algorithmsResearch.md` | `raw-xz` | `62015 -> 20580` | `0.331855` | `66.81%` | `122.009` | `0.876` | `PASS` |
+| Primary binary benchmark | `assets/primary.3b.bin` | `monotonic-delta` | `3233613 -> 562836` | `0.174058` | `82.59%` | `4715.248` | `19.225` | `PASS` |
+| Cat challenge benchmark | `assets/cat_challenge.png` | `recursive-circuit-xz` | `2969404 -> 2670718` | `0.899412` | `10.06%` | `60335.199` | `517.834` | `PASS` |
+| Cat challenge stream benchmark | `assets/cat_challenge.png` | `wide-overfit stream` | `2969404 -> 2670846` | `0.899455` | `10.05%` | `111686.005` | `8128.408` | `PASS` |
+
+Compression times are substantially lower than the 2026-05-07 snapshot: paper `313 ms -> 122 ms` (~2.6x faster), primary `16635 ms -> 4715 ms` (~3.5x faster), cat `112500 ms -> 60335 ms` (~1.9x faster), all at byte-identical ratios. The improvement comes from a cheap XZ-3 ranking pass that picks the top-K transform plans before the expensive `choose_best_codec` evaluation, plus a leaner per-plan winner-refinement tuning matrix.
 
 ### Latest Cat Stream Multilevel Profiles
 
-| Profile | Ratio | Savings | Original -> Compressed (bytes) | Compression ms | Decompression ms | Compression MiB/s | Decompression MiB/s | Compression RSS delta KiB | Decompression RSS delta KiB | Peak RSS KiB | Validation | Resume |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `realtime-fast` | `0.999011` | `0.10%` | `2969404 -> 2966468` | `1444.139` | `6.678` | `1.961` | `424.027` | `n/a` | `n/a` | `n/a` | `PASS` | `PASS` |
-| `realtime-balanced` | `0.998602` | `0.14%` | `2969404 -> 2965252` | `3807.462` | `5.926` | `0.744` | `477.841` | `n/a` | `n/a` | `n/a` | `PASS` | `PASS` |
-| `realtime-deep` | `0.899455` | `10.05%` | `2969404 -> 2670846` | `280198.816` | `8386.378` | `0.010` | `0.338` | `n/a` | `n/a` | `n/a` | `PASS` | `PASS` |
-| `wide-overfit` | `0.899455` | `10.05%` | `2969404 -> 2670846` | `257437.597` | `8496.314` | `0.011` | `0.333` | `n/a` | `n/a` | `n/a` | `PASS` | `PASS` |
+| Profile | Ratio | Savings | Original -> Compressed (bytes) | Compression ms | Decompression ms | Compression MiB/s | Decompression MiB/s | Validation | Resume |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `realtime-fast` | `0.999011` | `0.10%` | `2969404 -> 2966468` | `1021.660` | `6.007` | `2.772` | `471.450` | `PASS` | `PASS` |
+| `realtime-balanced` | `0.998602` | `0.14%` | `2969404 -> 2965252` | `3501.634` | `6.831` | `0.809` | `414.583` | `PASS` | `PASS` |
+| `realtime-deep` | `0.899455` | `10.05%` | `2969404 -> 2670846` | `193723.466` | `8251.937` | `0.015` | `0.343` | `PASS` | `PASS` |
+| `wide-overfit` | `0.899455` | `10.05%` | `2969404 -> 2670846` | `302112.453` | `10152.587` | `0.009` | `0.279` | `PASS` | `PASS` |
 
 Latest outputs for the tracked tests are written to:
 

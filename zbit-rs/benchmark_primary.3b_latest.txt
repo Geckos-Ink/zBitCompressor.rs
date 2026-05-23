@@ -1,7 +1,7 @@
 zBit-rs Real File Benchmark Report
-Generated: 2026-05-07 19:14:25
+Generated: 2026-05-23 00:31:39
 Input file: assets/primary.3b.bin
-Compressed artifact: zbit-rs/benchmark_primary.3b.zbpk
+Compressed artifact: /tmp/p3b.zbpk
 
 Active profile: balanced
 Selected method: monotonic-delta
@@ -18,7 +18,7 @@ Indexed-circuit candidate size (bytes): skipped by rules
 Indexed-huffman candidate size (bytes): 3230731
 Raw-deflate candidate size (bytes): 2682650
 Raw-zstd candidate size (bytes): 2590875
-Raw-xz candidate size (bytes): 833508
+Raw-xz candidate size (bytes): 833412
 Framed-raw candidate size (bytes): unavailable
 Recursive-circuit-xz candidate size (bytes): unavailable
 Monotonic-delta candidate size (bytes): 562836
@@ -28,18 +28,18 @@ Compressed size (bytes): 562836
 Compression ratio (compressed/original): 0.174058
 Space savings (%): 82.59
 
-Compression time (ms): 16634.566
-Decompression time (ms): 151.082
-Compression throughput (MiB/s): 0.185
-Decompression throughput (MiB/s): 20.411
+Compression time (ms): 4715.248
+Decompression time (ms): 30.919
+Compression throughput (MiB/s): 0.654
+Decompression throughput (MiB/s): 99.738
 
 Candidate timing breakdown (ms):
-- index stream build: 492.771
-- huffman stream build: 669.643
-- raw-deflate encode: 666.639
-- raw-zstd encode: 990.809
-- raw-xz encode: 819.695
-- framed extraction: 7593.273
+- index stream build: 68.131
+- huffman stream build: 77.262
+- raw-deflate encode: 77.434
+- raw-zstd encode: 285.277
+- raw-xz encode: 1091.547
+- framed extraction: 361.611
 - recursive preflate search: 0.000
 - recursive transform sampling: 0.000
 - recursive transform evaluation: 0.000
@@ -47,13 +47,18 @@ Candidate timing breakdown (ms):
 - recursive total: 0.000
 - candidate validation: 0.000
 
+Cache stats:
+- codec hits/misses: 1/4
+- preflate hits/misses: 0/0
+- stream-range hits/misses: 0/0
+
 Resource usage (KiB):
-- RSS before compression: 6112
-- RSS after compression: 20332
-- RSS after decompression: 22668
-- Compression RSS delta: 14220
-- Decompression RSS delta: 2336
-- Peak RSS (VmHWM): 588248
+- RSS before compression: n/a
+- RSS after compression: n/a
+- RSS after decompression: n/a
+- Compression RSS delta: n/a
+- Decompression RSS delta: n/a
+- Peak RSS (VmHWM): n/a
 
 Unique symbols: 256
 Bits per symbol index: 0

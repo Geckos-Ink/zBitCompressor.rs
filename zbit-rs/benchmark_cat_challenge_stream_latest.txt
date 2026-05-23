@@ -1,7 +1,7 @@
 zBit-rs Stream Benchmark Report
-Generated: 2026-05-07 21:06:58
-Input file: /home/riccardo/Sources/GitHub/zBitCompressor.rs/assets/cat_challenge.png
-Compressed artifact: /home/riccardo/Sources/GitHub/zBitCompressor.rs/zbit-rs/benchmark_cat_challenge_stream.zbps
+Generated: 2026-05-23 00:21:04
+Input file: /Users/riccardo/Sources/GitHub/zBitCompressor.rs/assets/cat_challenge.png
+Compressed artifact: /Users/riccardo/Sources/GitHub/zBitCompressor.rs/zbit-rs/benchmark_cat_challenge_stream.zbps
 
 Active profile: balanced
 Streaming settings:
@@ -32,23 +32,23 @@ Compressed size (bytes): 2670846
 Compression ratio (compressed/original): 0.899455
 Space savings (%): 10.05
 
-Compression time (ms): 112944.612
-Decompression time (ms): 9580.205
+Compression time (ms): 111686.005
+Decompression time (ms): 8228.301
 Compression throughput (MiB/s): 0.025
-Decompression throughput (MiB/s): 0.296
+Decompression throughput (MiB/s): 0.344
 
 Candidate timing breakdown (ms):
 - raw-deflate encode: 0.000
 - raw-zstd encode: 0.000
 - framed extraction: 0.000
-- recursive preflate search: 41653.969
-- recursive transform sampling: 864.189
-- recursive transform evaluation: 41068.447
-- recursive correction modeling: 7407.369
-- recursive total: 97849.612
-- stream global/shared payload build: 112917.543
+- recursive preflate search: 36941.305
+- recursive transform sampling: 1831.761
+- recursive transform evaluation: 41358.164
+- recursive correction modeling: 4279.980
+- recursive total: 101765.450
+- stream global/shared payload build: 111615.102
 - stream block planning: 0.000
-- candidate validation: 9591.990
+- candidate validation: 8313.182
 
 Cache stats:
 - codec hits/misses: 0/0
@@ -59,12 +59,12 @@ Skipped candidates:
 - none
 
 Resource usage (KiB):
-- RSS before compression: 5852
-- RSS after compression: 593764
-- RSS after decompression: 599624
-- Compression RSS delta: 587912
-- Decompression RSS delta: 5860
-- Peak RSS (VmHWM): 3392420
+- RSS before compression: n/a
+- RSS after compression: n/a
+- RSS after decompression: n/a
+- Compression RSS delta: n/a
+- Decompression RSS delta: n/a
+- Peak RSS (VmHWM): n/a
 
 Output validation: PASS
 Key-piece resume validation: PASS
