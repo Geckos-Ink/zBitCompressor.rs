@@ -23,8 +23,15 @@ use xz2::write::XzEncoder as XzWriterEncoder;
 use zstd::stream as zstd_stream;
 
 pub const ZBPK_MAGIC: u32 = 0x5A42_504B; // "ZBPK"
-pub const ZBPK_VERSION: u16 = 2;
-pub const ZBPK_HEADER_BYTES: usize = 36;
+pub const ZBPK_VERSION: u16 = 3;
+// Upper bound used for candidate-size estimation. The actual header is variable-length:
+//   magic u32 (4) + version u16 (2) + flags u16 (2) + packed method-and-bits u8 (1)
+//   + varint unique_count + varint original_size + varint dict_size + varint payload_size.
+// A varint of a u64 is at most 10 bytes; sizes up to 2^28 (256 MiB) fit in 4 bytes, sizes
+// up to 2^35 (32 GiB) fit in 5. We size the estimate to comfortably cover anything that
+// will actually be packed and use it only for sorting candidates by total bytes — the
+// final write emits the exact varint sequence regardless.
+pub const ZBPK_HEADER_BYTES: usize = 9 + 4 * 5;
 pub const ZBPS_MAGIC: u32 = 0x5A42_5053; // "ZBPS"
 pub const ZBPS_VERSION: u16 = 1;
 const ZBPS_HEADER_BYTES: usize = 40;
@@ -1292,15 +1299,39 @@ fn write_pack_bytes(
 
     let mut out = Vec::with_capacity(ZBPK_HEADER_BYTES + dict_size + payload_size);
 
+    // v3 header layout (everything is principled by-bit / by-varint):
+    //   magic u32        — wire-stable
+    //   version u16      — wire-stable
+    //   flags u16        — reserved, MUST be 0
+    //   packed u8        — bits 0..3 = method index (16 slots), bits 4..7 = bits_per_symbol
+    //                       (0..8). Both enums fit cleanly in 4 bits each.
+    //   varint unique_count        — typically 0..256 for byte streams
+    //   varint original_size       — varint avoids spending 8 bytes on tiny files
+    //   varint dict_size           — varint
+    //   varint payload_size        — varint
+    // We assert at write time that method/bits_per_symbol fit in 4 bits — if a future
+    // refactor pushes either above 15 we bump the version again rather than silently
+    // truncate.
     push_u32(&mut out, ZBPK_MAGIC);
     push_u16(&mut out, ZBPK_VERSION);
     push_u16(&mut out, 0);
-    out.push(method.as_u8());
-    out.push(bits_per_symbol);
-    push_u16(&mut out, unique_count as u16);
-    push_u64(&mut out, input.len() as u64);
-    push_u64(&mut out, dict_size as u64);
-    push_u64(&mut out, payload_size as u64);
+    let method_index = method.as_u8();
+    if method_index > 0x0F {
+        return Err(ZbitError::Internal(format!(
+            "method index {method_index} exceeds 4-bit header field"
+        )));
+    }
+    if bits_per_symbol > 0x0F {
+        return Err(ZbitError::Internal(format!(
+            "bits_per_symbol {bits_per_symbol} exceeds 4-bit header field"
+        )));
+    }
+    let packed_byte = (method_index & 0x0F) | ((bits_per_symbol & 0x0F) << 4);
+    out.push(packed_byte);
+    push_varint_u64(&mut out, unique_count as u64);
+    push_varint_u64(&mut out, input.len() as u64);
+    push_varint_u64(&mut out, dict_size as u64);
+    push_varint_u64(&mut out, payload_size as u64);
 
     match method {
         PackMethod::RawCopy => {}
@@ -1713,14 +1744,14 @@ fn decompress_pack_bytes(bytes: &[u8]) -> ZbitResult<Vec<u8>> {
         ));
     }
 
-    let method = PackMethod::from_u8(read_u8(&bytes, &mut cursor)?)
+    let packed_byte = read_u8(&bytes, &mut cursor)?;
+    let method = PackMethod::from_u8(packed_byte & 0x0F)
         .ok_or_else(|| ZbitError::Parse("invalid pack method".to_string()))?;
-
-    let bits_per_symbol = read_u8(&bytes, &mut cursor)?;
-    let unique_count = read_u16(&bytes, &mut cursor)? as usize;
-    let original_size = read_u64(&bytes, &mut cursor)? as usize;
-    let dict_size = read_u64(&bytes, &mut cursor)? as usize;
-    let payload_size = read_u64(&bytes, &mut cursor)? as usize;
+    let bits_per_symbol = (packed_byte >> 4) & 0x0F;
+    let unique_count = read_varint_u64(&bytes, &mut cursor)? as usize;
+    let original_size = read_varint_u64(&bytes, &mut cursor)? as usize;
+    let dict_size = read_varint_u64(&bytes, &mut cursor)? as usize;
+    let payload_size = read_varint_u64(&bytes, &mut cursor)? as usize;
 
     if original_size > ZBPK_MAX_OUTPUT_BYTES {
         return Err(ZbitError::Parse(format!(

@@ -219,34 +219,54 @@ fn encode_trailing_zero_gap_bytes(gaps: &[u64], shift: u8) -> Option<Vec<u8>> {
     Some(out)
 }
 
-const MONOTONIC_DELTA_DICT_BYTES: usize = 28;
-
-fn monotonic_delta_dictionary_size(_stream: &MonotonicDeltaStream) -> usize {
-    MONOTONIC_DELTA_DICT_BYTES
+// v3 dictionary layout for MonotonicDelta (variable length, typically ~10-15 B):
+//   meta u8           bits 0..2 = width (1..=8 maps to 0..=7 via `width - 1`)
+//                     bits 3..5 = mode  (5 modes fit in 3 bits)
+//                     bits 6..7 = codec (4 values fit in 2 bits)
+//   shift u8          trailing_zero_shift (0..63 — could be 6 bits but byte-aligned
+//                     for round-trip clarity; the upper 2 bits are reserved and MUST be 0)
+//   varint count
+//   varint first_value
+//   varint transformed_plain_len
+// Replaces the prior fixed 28-byte layout. For typical primary.3b-style payloads
+// (count ~1 M, gaps small) the new dictionary is ~12 bytes — savings on this corpus
+// matter less in ratio because the file is already 0.174, but the principle is the
+// same as the other dictionaries: spend only the bits each enumeration value needs.
+fn monotonic_delta_dictionary_size(stream: &MonotonicDeltaStream) -> usize {
+    1 /* meta */ + 1 /* shift */
+        + varint_u64_len(stream.count)
+        + varint_u64_len(stream.first_value)
+        + varint_u64_len(stream.transformed_plain_len as u64)
 }
 
-// Dictionary layout for AdaptiveTransformedXz:
-//   transform_kind u8
-//   period         u32
-//   head           u32
-//   codec          u8
-//   plain_len      u64
-// Total = 1 + 4 + 4 + 1 + 8 = 18 bytes.
-const ADAPTIVE_TRANSFORMED_XZ_DICT_BYTES: usize = 18;
-
-fn adaptive_transformed_xz_dictionary_size(_stream: &AdaptiveTransformedXzStream) -> usize {
-    ADAPTIVE_TRANSFORMED_XZ_DICT_BYTES
+// v3 dictionary layout for AdaptiveTransformedXz (variable length, typically ~7-10 B):
+//   codec_kind u8     bits 0..1 = codec (4 values fit in 2 bits)
+//                     bits 2..7 = transform_kind_index (49 values fit in 6 bits,
+//                                  encoded via the same `kind_to_compact_index` table
+//                                  used by the recursive-circuit and topology paths)
+//   varint period
+//   varint head
+//   varint plain_len
+// Reduces from the prior fixed 18-byte layout: a typical adaptive-transformed-xz
+// candidate on a 95 MiB PyTorch model goes from 18 bytes to 9-10 bytes (5-byte plain_len
+// varint + ~1-2 bytes period/head + 1 byte codec/kind).
+fn adaptive_transformed_xz_dictionary_size(stream: &AdaptiveTransformedXzStream) -> usize {
+    1 + varint_u64_len(stream.transform_plan.period as u64)
+        + varint_u64_len(stream.transform_plan.head as u64)
+        + varint_u64_len(stream.plain_len)
 }
 
 fn write_adaptive_transformed_xz_dictionary(
     out: &mut Vec<u8>,
     stream: &AdaptiveTransformedXzStream,
 ) {
-    out.push(stream.transform_plan.kind.as_u8());
-    push_u32(out, stream.transform_plan.period);
-    push_u32(out, stream.transform_plan.head);
-    out.push(stream.codec.as_u8());
-    push_u64(out, stream.plain_len);
+    let kind_u8 = stream.transform_plan.kind.as_u8();
+    let kind_index = kind_to_compact_index(kind_u8).unwrap_or(kind_u8 & 0x3F);
+    let codec_kind = (stream.codec.as_u8() & 0x03) | ((kind_index & 0x3F) << 2);
+    out.push(codec_kind);
+    push_varint_u64(out, stream.transform_plan.period as u64);
+    push_varint_u64(out, stream.transform_plan.head as u64);
+    push_varint_u64(out, stream.plain_len);
 }
 
 fn decode_adaptive_transformed_xz_payload(
@@ -254,22 +274,23 @@ fn decode_adaptive_transformed_xz_payload(
     payload: &[u8],
     original_size: usize,
 ) -> ZbitResult<Vec<u8>> {
-    if dict_bytes.len() != ADAPTIVE_TRANSFORMED_XZ_DICT_BYTES {
-        return Err(ZbitError::Parse(format!(
-            "adaptive-transformed-xz dictionary size must be {ADAPTIVE_TRANSFORMED_XZ_DICT_BYTES} bytes"
-        )));
-    }
     let mut cursor = 0usize;
-    let kind_u8 = read_u8(dict_bytes, &mut cursor)?;
+    let codec_kind = read_u8(dict_bytes, &mut cursor)?;
+    let codec = PayloadCodec::from_u8(codec_kind & 0x03).ok_or_else(|| {
+        ZbitError::Parse("adaptive-transformed-xz dictionary has invalid codec".to_string())
+    })?;
+    let kind_index = (codec_kind >> 2) & 0x3F;
+    let kind_u8 = compact_index_to_kind(kind_index).ok_or_else(|| {
+        ZbitError::Parse(format!(
+            "adaptive-transformed-xz dictionary has invalid kind index {kind_index}"
+        ))
+    })?;
     let kind = CircuitTransformKind::from_u8(kind_u8).ok_or_else(|| {
         ZbitError::Parse("adaptive-transformed-xz dictionary has invalid transform kind".to_string())
     })?;
-    let period = read_u32(dict_bytes, &mut cursor)?;
-    let head = read_u32(dict_bytes, &mut cursor)?;
-    let codec = PayloadCodec::from_u8(read_u8(dict_bytes, &mut cursor)?).ok_or_else(|| {
-        ZbitError::Parse("adaptive-transformed-xz dictionary has invalid codec".to_string())
-    })?;
-    let plain_len = read_u64(dict_bytes, &mut cursor)? as usize;
+    let period = read_varint_u64(dict_bytes, &mut cursor)? as u32;
+    let head = read_varint_u64(dict_bytes, &mut cursor)? as u32;
+    let plain_len = read_varint_u64(dict_bytes, &mut cursor)? as usize;
     if cursor != dict_bytes.len() {
         return Err(ZbitError::Parse(
             "trailing bytes in adaptive-transformed-xz dictionary".to_string(),
@@ -297,13 +318,16 @@ fn decode_adaptive_transformed_xz_payload(
 }
 
 fn write_monotonic_delta_dictionary(out: &mut Vec<u8>, stream: &MonotonicDeltaStream) {
-    out.push(stream.width);
-    out.push(stream.mode.as_u8());
-    out.push(stream.codec.as_u8());
-    out.push(stream.trailing_zero_shift);
-    push_u64(out, stream.count);
-    push_u64(out, stream.first_value);
-    push_u64(out, stream.transformed_plain_len as u64);
+    // width ∈ 1..=8 stored as `width - 1` in 3 bits; mode in 3 bits; codec in 2 bits.
+    debug_assert!(stream.width >= 1 && stream.width <= 8);
+    let width_field = ((stream.width - 1) & 0x07) as u8;
+    let mode_field = (stream.mode.as_u8() & 0x07) << 3;
+    let codec_field = (stream.codec.as_u8() & 0x03) << 6;
+    out.push(width_field | mode_field | codec_field);
+    out.push(stream.trailing_zero_shift & 0x3F);
+    push_varint_u64(out, stream.count);
+    push_varint_u64(out, stream.first_value);
+    push_varint_u64(out, stream.transformed_plain_len as u64);
 }
 
 fn build_monotonic_delta_stream(
@@ -401,25 +425,28 @@ fn decode_monotonic_delta_payload(
     payload: &[u8],
     original_size: usize,
 ) -> ZbitResult<Vec<u8>> {
-    if dict_bytes.len() != MONOTONIC_DELTA_DICT_BYTES {
-        return Err(ZbitError::Parse(format!(
-            "monotonic-delta dictionary size must be {MONOTONIC_DELTA_DICT_BYTES} bytes"
-        )));
-    }
-
     let mut dict_cursor = 0usize;
-    let width = read_u8(dict_bytes, &mut dict_cursor)? as usize;
-    let mode =
-        MonotonicDeltaMode::from_u8(read_u8(dict_bytes, &mut dict_cursor)?).ok_or_else(|| {
-            ZbitError::Parse("monotonic-delta dictionary has invalid mode".to_string())
-        })?;
-    let codec = PayloadCodec::from_u8(read_u8(dict_bytes, &mut dict_cursor)?).ok_or_else(|| {
+    let meta = read_u8(dict_bytes, &mut dict_cursor)?;
+    let width = ((meta & 0x07) as usize) + 1;
+    let mode_field = (meta >> 3) & 0x07;
+    let mode = MonotonicDeltaMode::from_u8(mode_field).ok_or_else(|| {
+        ZbitError::Parse("monotonic-delta dictionary has invalid mode".to_string())
+    })?;
+    let codec_field = (meta >> 6) & 0x03;
+    let codec = PayloadCodec::from_u8(codec_field).ok_or_else(|| {
         ZbitError::Parse("monotonic-delta dictionary has invalid codec".to_string())
     })?;
-    let trailing_zero_shift = read_u8(dict_bytes, &mut dict_cursor)?;
-    let count = read_u64(dict_bytes, &mut dict_cursor)? as usize;
-    let first_value = read_u64(dict_bytes, &mut dict_cursor)?;
-    let transformed_plain_len = read_u64(dict_bytes, &mut dict_cursor)? as usize;
+    let shift_field = read_u8(dict_bytes, &mut dict_cursor)?;
+    if shift_field & 0xC0 != 0 {
+        return Err(ZbitError::Parse(
+            "monotonic-delta dictionary reserves the top 2 bits of trailing_zero_shift"
+                .to_string(),
+        ));
+    }
+    let trailing_zero_shift = shift_field & 0x3F;
+    let count = read_varint_u64(dict_bytes, &mut dict_cursor)? as usize;
+    let first_value = read_varint_u64(dict_bytes, &mut dict_cursor)?;
+    let transformed_plain_len = read_varint_u64(dict_bytes, &mut dict_cursor)? as usize;
 
     if dict_cursor != dict_bytes.len() {
         return Err(ZbitError::Parse(

@@ -498,7 +498,9 @@ mod tests {
         let mut single_plan_stream = stream.clone();
         single_plan_stream.multi_block = None;
         let single_plan_size = recursive_circuit_dictionary_size(&single_plan_stream);
-        let expected_multi_block_bytes = 4 + 4 + plans.len() * RECURSIVE_BLOCK_PLAN_BYTES;
+        let expected_multi_block_bytes = multi_block_section_size(
+            stream.multi_block.as_ref().expect("multi_block built above"),
+        );
         assert_eq!(
             dict_bytes.len(),
             single_plan_size + expected_multi_block_bytes,
@@ -508,12 +510,16 @@ mod tests {
     }
 
     #[test]
-    fn compact_topology_node_size_beats_legacy_layout() {
-        // Sanity check on the new circuit-representation savings: for a typical small-id /
-        // small-param node the compact serialisation should produce strictly fewer bytes
-        // than the fixed 28-byte legacy layout. This guards against regressions in the
-        // varint encoding or in the "kind + relation + order" packing.
-        let node = CircuitTopologyNode {
+    fn compact_topology_bit_lengths_match_design() {
+        // Sanity check that the bit-packed topology actually spends only the bits it
+        // claims to. Field widths: relation 1, order 2, kind_index 6, is_root 1,
+        // parent_index = ceil(log2(prev_count)) bits (0 for the first node), and
+        // params encoded as nibble-varint (3 value bits + 1 continuation bit per
+        // nibble). Anything larger here means a regression — exactly the kind of
+        // unused-combination waste this layout exists to eliminate.
+
+        // Node #0: root with kind=0 and zero params.
+        let root = CircuitTopologyNode {
             id: 1,
             parent_id: u32::MAX,
             relation: 0,
@@ -523,22 +529,16 @@ mod tests {
             param_b: 0,
             hash64: 0,
         };
-        let compact_size = compact_topology_node_size(&node);
-        assert!(
-            compact_size < TOPOLOGY_NODE_BYTES,
-            "compact node should be smaller than legacy 28-byte node, got {compact_size}"
-        );
-        // A trivial root node should fit in 6 bytes: 1 flag + 1 kind + 1 (id=1) + 1 (parent
-        // sentinel) + 1 (param_a=0) + 1 (param_b=0). Anything larger means a varint regression.
-        assert!(
-            compact_size <= 6,
-            "trivial root node should serialise in <= 6 bytes, got {compact_size}"
-        );
+        let root_bits = compact_topology_node_bit_len(&root, 0);
+        // 1 + 2 + 6 + 1 + 0 (no parent) + 4 (one nibble for 0) + 4 = 18 bits
+        assert_eq!(root_bits, 18, "root node should be exactly 18 bits");
 
-        // A node with a medium-sized period (typical PNG stride 6401) takes 2 bytes for
-        // the period varint; check the math.
-        let node_with_period = CircuitTopologyNode {
-            id: 3,
+        // Node #1: child of node #0 with a PNG-stride period of 6401 and head=1.
+        // Field widths: 1+2+6+1+0(parent_index has 0 width for prev_count==1) +
+        // nibble-varint(6401) + nibble-varint(1). 6401 in base-8 is 14401, which
+        // needs ceil(log2(6402)/3) = 5 nibbles → 20 bits. 1 needs 1 nibble = 4 bits.
+        let stride_child = CircuitTopologyNode {
+            id: 2,
             parent_id: 1,
             relation: 1,
             order: 2,
@@ -547,9 +547,21 @@ mod tests {
             param_b: 1,
             hash64: 0,
         };
-        let sized = compact_topology_node_size(&node_with_period);
-        // 1 flag + 1 kind + 1 id + 1 parent + 2 (period 6401 varint) + 1 = 7
-        assert_eq!(sized, 7, "expected exactly 7 bytes for medium-period node");
+        let child_bits = compact_topology_node_bit_len(&stride_child, 1);
+        assert_eq!(child_bits, 1 + 2 + 6 + 1 + 0 + 20 + 4);
+
+        // The two-node topology in bytes: ceil((18 + 34) / 8) = 7 payload bytes,
+        // plus the 4-byte node_bit_len header in front => 11 bytes total. The
+        // legacy fixed-width form for the same nodes would be 56 bytes (28 each),
+        // so the new layout uses ~20% of the original space.
+        let total_bytes = compact_topology_total_size(&[root.clone(), stride_child.clone()]);
+        let legacy_bytes = 2 * TOPOLOGY_NODE_BYTES;
+        assert_eq!(total_bytes, 4 + ((18 + child_bits + 7) / 8));
+        assert!(
+            total_bytes * 4 < legacy_bytes,
+            "bit-packed two-node topology ({total_bytes} B) should be at least 4x \
+             smaller than the legacy layout ({legacy_bytes} B)"
+        );
     }
 
     #[test]

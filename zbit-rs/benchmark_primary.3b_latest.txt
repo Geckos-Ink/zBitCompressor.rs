@@ -1,11 +1,11 @@
 zBit-rs Real File Benchmark Report
-Generated: 2026-05-23 12:17:56
+Generated: 2026-05-23 13:19:36
 Input file: assets/primary.3b.bin
 Compressed artifact: /tmp/p3b.zbpk
 
 Active profile: balanced
 Selected method: monotonic-delta
-Selection reason: monotonic-delta improves size: 3233649 -> 562836 bytes
+Selection reason: monotonic-delta improves size: 3233642 -> 562810 bytes
 Circuit evaluation rule: symbol width <= 8 bits: raw dictionary is denser than circuit descriptors
 
 Skipped candidates:
@@ -13,35 +13,35 @@ Skipped candidates:
 - adaptive-transformed-xz skipped: raw-xz already strong (ratio <= 0.30, payload 833376 on input 3233613)
 - indexed-circuit skipped: symbol width <= 8 bits: raw dictionary is denser than circuit descriptors
 
-Raw candidate size (bytes): 3233649
-Indexed-raw candidate size (bytes): 3233905
+Raw candidate size (bytes): 3233642
+Indexed-raw candidate size (bytes): 3233898
 Indexed-circuit candidate size (bytes): skipped by rules
-Indexed-huffman candidate size (bytes): 3230731
-Raw-deflate candidate size (bytes): 2682650
-Raw-zstd candidate size (bytes): 2590875
-Raw-xz candidate size (bytes): 833412
+Indexed-huffman candidate size (bytes): 3230724
+Raw-deflate candidate size (bytes): 2682643
+Raw-zstd candidate size (bytes): 2590868
+Raw-xz candidate size (bytes): 833405
 Framed-raw candidate size (bytes): unavailable
 Recursive-circuit-xz candidate size (bytes): unavailable
-Monotonic-delta candidate size (bytes): 562836
+Monotonic-delta candidate size (bytes): 562810
 Adaptive-transformed-xz candidate size (bytes): unavailable
 
 Original size (bytes): 3233613
-Compressed size (bytes): 562836
-Compression ratio (compressed/original): 0.174058
-Space savings (%): 82.59
+Compressed size (bytes): 562799
+Compression ratio (compressed/original): 0.174046
+Space savings (%): 82.60
 
-Compression time (ms): 3695.210
-Decompression time (ms): 29.139
-Compression throughput (MiB/s): 0.835
-Decompression throughput (MiB/s): 105.830
+Compression time (ms): 5307.513
+Decompression time (ms): 36.355
+Compression throughput (MiB/s): 0.581
+Decompression throughput (MiB/s): 84.826
 
 Candidate timing breakdown (ms):
-- index stream build: 67.699
-- huffman stream build: 79.233
-- raw-deflate encode: 76.711
-- raw-zstd encode: 263.663
-- raw-xz encode: 994.311
-- framed extraction: 37.568
+- index stream build: 71.414
+- huffman stream build: 76.590
+- raw-deflate encode: 78.366
+- raw-zstd encode: 318.167
+- raw-xz encode: 1456.654
+- framed extraction: 39.525
 - recursive preflate search: 0.000
 - recursive transform sampling: 0.000
 - recursive transform evaluation: 0.000

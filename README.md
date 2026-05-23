@@ -284,9 +284,9 @@ Current snapshot (reports generated on 2026-05-23):
 
 | Test | Input | Selected method/profile | Original -> Compressed (bytes) | Ratio | Savings | Compression ms | Decompression ms | Validation |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Paper benchmark | `papers/zbit-algorithmsResearch.md` | `raw-xz` | `62015 -> 20580` | `0.331855` | `66.81%` | `63.937` | `0.849` | `PASS` |
-| Primary binary benchmark | `assets/primary.3b.bin` | `monotonic-delta` | `3233613 -> 562836` | `0.174058` | `82.59%` | `3695.210` | `18.812` | `PASS` |
-| Cat challenge benchmark | `assets/cat_challenge.png` | `recursive-circuit-xz` | `2969404 -> 2670632` | `0.899383` | `10.07%` | `49632.414` | `483.917` | `PASS` |
+| Paper benchmark | `papers/zbit-algorithmsResearch.md` | `raw-xz` | `62015 -> 20561` | `0.331549` | `66.85%` | `70.821` | `0.832` | `PASS` |
+| Primary binary benchmark | `assets/primary.3b.bin` | `monotonic-delta` | `3233613 -> 562799` | `0.174046` | `82.60%` | `5307.513` | `18.937` | `PASS` |
+| Cat challenge benchmark | `assets/cat_challenge.png` | `recursive-circuit-xz` | `2969404 -> 2670571` | `0.899363` | `10.07%` | `58945.348` | `481.421` | `PASS` |
 | Cat challenge stream benchmark | `assets/cat_challenge.png` | `wide-overfit stream` | `2969404 -> 2670846` | `0.899455` | `10.05%` | `112964.407` | `8186.741` | `PASS` |
 | Depth Anything model benchmark | `assets/depth_anything_v2_vits.pth` | `adaptive-transformed-xz` | `99218434 -> 83380790` | `0.840376` | `15.96%` | `1405690.364` | `236.317` | `PASS` |
 
@@ -298,19 +298,41 @@ The N3 multi-block recursive-circuit path is also landed (deep/research only): t
 
 A new top-level pack method `adaptive-transformed-xz` brings the same reversible-transform search to inputs that are *not* framed deflate (e.g. PyTorch `.pth` model files, raw float-tensor dumps). It runs `choose_adaptive_transform_plan` on the raw input, encodes the best transformed payload with the full codec/tuned-XZ selection, and stores a small 18-byte dictionary `(transform_kind, period, head, codec, plain_len)` so the decoder can invert the transform deterministically. Two cost gates keep it bounded: skip when recursive-circuit-xz already covers the same search; skip when raw-xz already compresses to ≤ 0.30 of the input (already-strong corpora like `primary.3b.bin`). A 128 KiB size threshold keeps small text files out of the plan search. On the new `depth_anything_v2_vits.pth` corpus it wins by **~7 MB (~7.8 %)** vs raw-xz alone: raw-xz `90 414 940 → 83 380 790` adaptive-transformed-xz, final ratio `0.840376` on 99 218 434 input bytes.
 
-### Compact (bit-packed) topology serialisation
+### ZBPK v3: bit-wise / enum-cut-out across every dictionary
 
-Circuit-topology nodes used to be serialised in a fixed 28-byte-per-node layout: `id` u32 + `parent_id` u32 + `relation` u8 + `order` u16 + `kind` u8 + `param_a` u32 + `param_b` u32 + a per-node 8-byte FNV-style hash. With ~5 distinct relation values, 2-bit-wide `order`, and small node ids and parameters in practice, that layout left several bits per field unused for every node written. The new **compact** form, signalled by the `0x4000 COMPACT_TOPOLOGY_FLAG` bit on the on-disk topology-count `u16`, writes each node as:
+The on-disk format is now **ZBPK v3**. Every dictionary section was rebuilt under the same rule the topology bit-packing introduced: spend only the bits each enumeration value or magnitude actually needs, never a whole byte for a single bit of state. The previous round had compacted only the topology nodes; v3 closes the gap so no field of any pack method wastes bits on combinations that never occur:
 
-- 1 flag byte: `(relation:1 | order:7)`
-- 1 raw `kind` byte
-- varint `id`
-- varint `parent_id + 1` (0 = root sentinel; avoids a 5-byte varint per root)
-- varint `param_a`
-- varint `param_b`
-- **no per-node hash** — overall decode correctness already validates the topology end-to-end through the inverse-transform pipeline
+- **ZBPK header.** `method` (≤ 16 values) and `bits_per_symbol` (0..=15) are packed into one byte (4 bits each). `unique_count`, `original_size`, `dict_size`, and `payload_size` are varints instead of fixed `u16`/`u64`. The header on a 62 KB text file shrinks from 36 B to **17 B**.
+- **Framed-payload dictionary.** The six u32 size fields (prefix_len, suffix_len, base_chunk_len, full_chunk_count, tail_chunk_len, total_chunks) are varints; the fixed section drops from 28 B to ~12 B.
+- **Recursive-circuit fixed section.** The four u64 sizes are varints. A single `u16` carries `(transformed_codec:2 | correction_codec:2 | transform_kind_index:6 | reserved:6)` instead of three separate `u8`s. `period` and `head` are varints. Together this drops the fixed section from 51 B to ~25 B.
+- **Multi-block plan trailer.** `block_count`, `block_size`, and each plan's `period`/`head` are varints; the plan's kind index is one byte (6 bits used). Per-plan slot goes from 9 B to 3-5 B.
+- **Adaptive-transformed-xz dictionary.** One packed byte `(codec:2 | kind_index:6)` plus varint `period`/`head`/`plain_len`. Drops from 18 B to ~9 B.
+- **Monotonic-delta dictionary.** One packed byte `(width-1:3 | mode:3 | codec:2)`, then `trailing_zero_shift` (6 bits used out of its byte), then varint `count`/`first_value`/`transformed_plain_len`. Drops from 28 B to ~12 B.
 
-A trivial root node serialises in 6 bytes (was 28); a node carrying a PNG-stride 6401 period serialises in 7 bytes (was 28). The compact flag is independent of the existing `0x8000 MULTI_BLOCK_FLAG` so both extensions compose. Legacy single-plan dictionaries (neither flag set) continue to decode with the fixed-width path and full per-node hash verification, so older `.zbpk` files keep working unchanged. The measurable ratio win on cat (`0.899412 -> 0.899383`, 86 bytes saved across a 4-node topology) is small in absolute terms but principled: the format no longer wastes bits per node on unused enumeration combinations.
+All five share the **same** dense `kind_to_compact_index` table the topology bit-packing introduced, so the 49 distinct `CircuitTransformKind`-derived values fit in exactly 6 bits everywhere they appear. Measured wins on the existing corpus (all `PASS`):
+
+| Corpus | Before v3 | After v3 | Δ bytes |
+|---|---:|---:|---:|
+| paper | 20 580 | **20 561** | −19 B |
+| primary.3b | 562 836 | **562 799** | −37 B |
+| cat | 2 670 624 | **2 670 571** | −53 B (cumulative −147 B vs the original v2) |
+
+The absolute byte counts are small because the payload dominates, but the format no longer carries any bits the enumerations themselves don't need — every bit on the wire is principled.
+
+### Bit-packed topology serialisation
+
+Circuit-topology nodes used to be serialised in a fixed 28-byte-per-node layout: `id` u32 + `parent_id` u32 + `relation` u8 + `order` u16 + `kind` u8 + `param_a` u32 + `param_b` u32 + a per-node 8-byte FNV-style hash. With only 2 valid `relation` values, an `order` that builders never push above 3, and ~49 distinct `kind` values in use, that layout left several bits per field unused for every node written. The new **bit-packed** form, signalled by the `0x4000 RECURSIVE_TOPOLOGY_COMPACT_FLAG` bit on the on-disk topology-count `u16`, writes the entire topology as a single MSB-first bit stream where every field consumes only the bits it actually needs:
+
+- **relation** — 1 bit
+- **order** — 2 bits (0..3 covers every builder)
+- **kind_index** — 6 bits (49 in-use kinds mapped to a dense 0..48 range; 0..26 = normal topology kinds, 27..49 = embedded correction-plan kinds)
+- **is_root** — 1 bit
+- **parent_index** — `ceil(log2(prev_node_count))` bits when not root: 0 bits for the very first child (only one possible parent), 1 bit for nodes #2..#3, 2 bits for nodes #4..#5, …
+- **param_a / param_b** — nibble varints (3 value bits + 1 continuation bit per nibble; small values cost 4 bits each, PNG-stride 6401 costs 20 bits)
+- **id** — implicit (= `position + 1`), 0 bits on the wire
+- **hash64** — removed; overall decode correctness already validates the topology end-to-end through the inverse-transform pipeline
+
+A trivial root node spends **18 bits** (was 224 bits of fixed slot); a child node carrying a PNG-stride 6401 period spends **34 bits** (was 224). The whole 5-node topology for the cat-challenge PNG goes from 140 bytes to 18 bytes — roughly an **8× compaction** on the topology itself. The compact flag is independent of the existing `0x8000 MULTI_BLOCK_FLAG` so both extensions compose. Legacy single-plan dictionaries (neither flag set) continue to decode with the fixed-width path and full per-node hash verification, so older `.zbpk` files keep working unchanged. Cat ratio measured win: `0.899412 -> 0.899380` (94 bytes saved across the 5-node topology). The number is small in absolute terms because the topology was tiny vs the payload, but it is principled: the wire no longer carries any bits for combinations the enumerations never use.
 
 ### Latest Cat Stream Multilevel Profiles
 

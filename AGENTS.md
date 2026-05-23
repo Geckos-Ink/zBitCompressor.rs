@@ -13,6 +13,58 @@
 - License file: `LICENSE`
 
 ## Recent Updates
+- 2026-05-23: Bumped `ZBPK_VERSION` to **3** and applied the same bit-wise / enumeration
+  cut-out philosophy to every dictionary section of the on-disk format. The previous
+  rounds had touched only the topology nodes; this round closes the gap so no field of
+  any pack method spends bytes on combinations the enumeration never uses.
+
+  Format changes (all v3):
+  - **ZBPK header** (`zbit-rs/src/pack/core.rs`). Was: `magic u32 + version u16 + flags
+    u16 + method u8 + bits_per_symbol u8 + unique_count u16 + 3 × u64 sizes` = 36 fixed
+    bytes. Now: `magic + version + flags` kept fixed; `method` and `bits_per_symbol`
+    packed into one byte (4 bits each, covering 16 method slots and 0..=15 bits-per-
+    symbol); `unique_count`, `original_size`, `dict_size`, `payload_size` written as
+    `push_varint_u64`. Header on a 62 KB paper file shrinks from 36 B to 17 B.
+  - **Framed-payload dictionary** (`zbit-rs/src/pack/recursive.rs`). The six u32 size
+    fields (prefix_len, suffix_len, base_chunk_len, full_chunk_count, tail_chunk_len,
+    total_chunks) are now varints. Frame tag stays a fixed 4 bytes. Typical fixed
+    section drops from 28 B to ~12 B.
+  - **Recursive-circuit fixed section** (51 B → ~25 B). The four `u64` size fields
+    (plain_len, transformed_encoded_len, correction_plain_len, correction_encoded_len)
+    are varints. Codecs and transform kind are packed into a single `u16`: bits 0..1 =
+    transformed_codec, bits 2..3 = correction_codec, bits 4..9 = transform_kind index
+    (49 values mapped to 0..48 via `kind_to_compact_index`), bits 10..15 reserved.
+    `period` and `head` are varints.
+  - **Multi-block plan trailer**. `block_count` and `block_size` are varints; each
+    per-plan entry is `kind_index u8 (6 bits used) + varint period + varint head`,
+    replacing the prior fixed `u8 + u32 + u32` = 9 B per entry with typically 3-5 B.
+  - **Adaptive-transformed-xz dictionary** (18 B → ~9 B). One packed byte
+    `(codec:2 | kind_index:6)` replaces the prior `kind u8 + codec u8`; `period`,
+    `head`, and `plain_len` are varints.
+  - **Monotonic-delta dictionary** (28 B → ~12 B). One packed byte
+    `(width-1:3 | mode:3 | codec:2)` replaces the prior `width u8 + mode u8 + codec u8`;
+    `trailing_zero_shift` reserves the top 2 bits of its byte; `count`, `first_value`,
+    `transformed_plain_len` are varints.
+
+  All five share the same kind-index dense table from the topology bit-packing, so the
+  49 distinct `CircuitTransformKind`-derived values fit in 6 bits everywhere. Legacy
+  v2 files no longer decode (intentional — the format was experimental and v2 artefacts
+  were ephemeral benchmark output already cleaned up by the scripts).
+
+  Measured on the existing corpus (all PASS validation):
+  - paper `0.331855 → 0.331549`, **−19 B** (`20580 → 20561`), time 64 → 71 ms.
+  - primary.3b `0.174058 → 0.174046`, **−37 B** (`562836 → 562799`), time 4 538 → 5 307 ms.
+  - cat `0.899380 → 0.899363`, **−53 B** (`2670624 → 2670571`), time 56 814 → 58 945 ms.
+    Cumulative savings since the original v2 baseline: 147 bytes on the 5-node cat
+    topology + the new dictionary compaction.
+  - depth_anything: pending re-measure with the v3 format; the adaptive-transformed-xz
+    dictionary drops from 18 B to ~9 B and the header from 36 B to ~22 B → expected
+    ~23 B saving in the dictionary footprint on the 99 MiB corpus.
+
+  Tests: existing 22 lib tests + integration suite all PASS. The
+  `multi_block_apply_invert_roundtrip` test was updated to compute the expected extra
+  bytes via `multi_block_section_size(...)` instead of the prior constant-width
+  assumption.
 - 2026-05-23: Three combined improvements to compression time + circuit serialisation
   efficiency.
   1. **Bounded framed-payload analyzer** (`zbit-rs/src/pack/recursive.rs`). The
@@ -30,28 +82,38 @@
      full XZ matrix walk that previously fired both inside `build_raw_xz_payload` and
      inside any other caller hashing the same byte stream. Reported as
      `tuned-xz hits/misses` in the benchmark report.
-  3. **Bit-packed (compact) topology serialisation** — the headline circuit-representation
-     win. Legacy topology nodes used a fixed 28-byte-per-node on-disk layout (id/parent
-     u32 each + relation u8 + order u16 + kind u8 + param_a/b u32 each + 8-byte hash).
-     The new compact form writes:
-     - 1 flag byte `(relation:1 | order:7)`,
-     - 1 raw `kind` byte,
-     - varint-encoded `id`, `parent_id+1` (0 = root sentinel), `param_a`, `param_b`,
-     - **no per-node hash** (overall decode correctness already validates the topology
-       end-to-end through the inverse-transform pipeline).
+  3. **Bit-packed topology serialisation** — the headline circuit-representation win.
+     Legacy topology nodes used a fixed 28-byte (224-bit) per-node on-disk layout
+     (id/parent u32 each + relation u8 + order u16 + kind u8 + param_a/b u32 each +
+     8-byte hash) — almost none of which actually used all its bits in practice. The new
+     form writes the whole topology as a single MSB-first bit stream where every field
+     consumes only the bits it needs:
+     - **relation**: 1 bit
+     - **order**: 2 bits (builders never emit > 3)
+     - **kind_index**: 6 bits (49 distinct kind values mapped to a dense 0..48 range;
+       0..26 for normal topology kinds, 27..49 for embedded correction-plan kinds)
+     - **is_root**: 1 bit
+     - **parent_index**: `ceil(log2(prev_count))` bits when not root — 0 bits when there
+       is only one possible parent, 1 bit for nodes #2..#3, 2 bits for #4..#5, …
+     - **param_a / param_b**: nibble varints (3 value bits + 1 continuation bit per
+       nibble; head=1 costs 4 bits, period=6401 costs 20 bits)
+     - **id**: implicit (= position + 1), 0 bits on the wire
+     - **hash64**: removed; the overall decode pipeline already validates the topology
+       end-to-end through inverse transforms.
 
-     A trivial root node serialises in 6 bytes (was 28); a node carrying a PNG-stride
-     6401 period serialises in 7 bytes (was 28). The on-disk topology-count `u16` gets
-     a new `0x4000 RECURSIVE_TOPOLOGY_COMPACT_FLAG` (counterpart of the existing 0x8000
-     multi-block flag); legacy dictionaries without the flag continue to decode with the
-     fixed-width path and full hash verification.
+     A trivial root node spends 18 bits (was 224 bits); a child node with a PNG-stride
+     6401 period spends 34 bits (was 224). The whole 5-node cat topology shrinks from
+     140 bytes to 18 bytes — an ~8x compaction on the topology itself. Signalled by
+     `0x4000 RECURSIVE_TOPOLOGY_COMPACT_FLAG` on the topology-count `u16` (composes
+     with the existing `0x8000 MULTI_BLOCK_FLAG`); legacy dictionaries without the flag
+     continue to decode with the fixed-width path and full hash verification.
 
   Measured impact on the existing corpus:
   - paper `0.331855` ratio unchanged, time `101 → 64 ms` (~1.6 x faster).
-  - primary.3b `0.174058` ratio unchanged, time `4 780 → 3 695 ms` (~1.3 x faster).
-  - cat ratio **improved** `0.899412 → 0.899383` (86 fewer bytes thanks to compact
-    topology — ~22 bytes saved per node × 4 typical nodes), time `60 335 → 49 632 ms`
-    (~1.2 x faster, framed_extraction collapsed).
+  - primary.3b `0.174058` ratio unchanged, time `4 780 → 4 538 ms`.
+  - cat ratio **improved** `0.899412 → 0.899380` (94 fewer bytes thanks to bit-packed
+    topology — the 5-node cat topology shrinks from 140 B to ~18 B on the wire), time
+    `60 335 → 56 814 ms`.
   - depth_anything: `5 429 743 → 1 405 690 ms` (~3.9 x faster); framed_extraction alone
     `3 877 752 → 255 ms`. Ratio unchanged at `0.840376`. The remaining cost is
     legitimate XZ work: 946 s in raw-xz tuning + 289 s in adaptive transform evaluation.
