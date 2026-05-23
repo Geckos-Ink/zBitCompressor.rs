@@ -13,6 +13,47 @@
 - License file: `LICENSE`
 
 ## Recent Updates
+- 2026-05-23: Two real structural changes on top of the v3 dictionary compaction.
+  1. **Multi-block plan dictionary** (`zbit-rs/src/pack/recursive.rs`). The first
+     concrete "classic dictionary compression through repeated circuits" step. The
+     multi-block trailer now writes:
+     - `varint block_count`, `varint block_size`
+     - `varint plan_table_len` plus the **deduplicated** unique `(kind_index u8, varint
+       period, varint head)` triples
+     - a bit stream of per-block indices, each using exactly `ceil(log2(plan_table_len))`
+       bits.
+     When every block shares one plan the per-block cost collapses to **0 bits**; when
+     there are 2 distinct plans across N blocks the cost is N bits + one extra plan in
+     the table. Replaces the prior "one full plan triple per block" layout.
+  2. **`transformed_encoded_len` removed from the recursive-circuit dictionary**. It is
+     redundant: `transformed_encoded_len = payload_size − correction_encoded_len`, and
+     both other values are already on the wire (ZBPK header and the recursive dict
+     respectively). Saves a varint per recursive-circuit-xz file.
+  3. **Runtime raw-xz skip when adaptive clearly wins**
+     (`zbit-rs/src/pack/core.rs::compress_adaptive_to_bytes`). The flow now:
+     - computes a cheap raw-xz estimate via a single `xz_encode_easy_preset(input, 3)`
+       call (1 XZ-3 encode, no tuning matrix)
+     - runs the framed/recursive/adaptive paths
+     - **skips** the full raw-xz tuning matrix when adaptive's encoded size is at least
+       1 KiB smaller than the cheap raw-xz estimate (in that case raw-xz cannot win, so
+       the matrix walk would be pure waste). The cheap payload is used as the raw-xz
+       candidate and loses selection to adaptive.
+     For depth_anything this drops compression time from `1 405 690 ms → 628 278 ms`
+     (~2.2x faster vs prior, ~8.6x faster vs the original baseline). For
+     paper/primary/cat the path is unchanged (adaptive skipped by size/ratio/recursive
+     gates respectively, so the full raw-xz tuning still runs).
+
+  ROADMAP.md gained an "Honest Note on Dictionary Compaction Limits" section: with all
+  five dictionary sections bit-packed, the dictionary footprint on cat is now ~110 B
+  out of 2 670 567 B compressed output (~0.004 %). Further header-level compaction
+  cannot meaningfully change ratio; the payload (>99.99 % of every file) is what
+  matters. The next real ratio levers are documented there: the cross-region Circuit
+  Atlas, container-aware paths (PyTorch tensor-aware compression in particular), and
+  — much further out — replacing XZ with a context-adaptive entropy coder.
+
+  Tracked ratios held: paper `0.331549`, primary.3b `0.174046`, cat `0.899361` (151 B
+  saved cumulatively since the original v2 baseline), depth_anything `0.840376`. All
+  PASS validation. All 22 lib tests + integration suite PASS.
 - 2026-05-23: Bumped `ZBPK_VERSION` to **3** and applied the same bit-wise / enumeration
   cut-out philosophy to every dictionary section of the on-disk format. The previous
   rounds had touched only the topology nodes; this round closes the gap so no field of

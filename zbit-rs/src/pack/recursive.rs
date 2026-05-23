@@ -721,9 +721,11 @@ fn compact_topology_eligible(nodes: &[CircuitTopologyNode]) -> bool {
 // The legacy fixed-width form (used internally for size estimation when we want a fast
 // upper bound) was 51 bytes; the actual v3 dictionary is variable but typically 25-35 B.
 fn recursive_circuit_fixed_section_size(stream: &RecursiveCircuitStream) -> usize {
+    // `transformed_encoded_len` is intentionally NOT serialised: it is reconstructed at
+    // decode time as `payload_size - correction_encoded_len` (both available from the
+    // ZBPK header and this dictionary respectively). Storing it would be redundant.
     2 /* zlib_header */ + 4 /* zlib_adler32 */
         + varint_u64_len(stream.plain_len as u64)
-        + varint_u64_len(stream.transformed_encoded_len as u64)
         + varint_u64_len(stream.correction_plain_len as u64)
         + varint_u64_len(stream.correction_encoded_len as u64)
         + 2 /* codec_kind u16 */
@@ -732,13 +734,51 @@ fn recursive_circuit_fixed_section_size(stream: &RecursiveCircuitStream) -> usiz
         + 2 /* topology_field u16 */
 }
 
-fn multi_block_section_size(plan: &MultiBlockPlan) -> usize {
-    let mut size = varint_u64_len(plan.plans.len() as u64) + varint_u64_len(plan.block_size as u64);
+// Multi-block plan dictionary — a real first step toward the Circuit Atlas. Instead of
+// repeating `(kind, period, head)` for every one of N blocks, we deduplicate the unique
+// plans into a small per-pack table at the head of the trailer and per-block we store
+// only an index into that table. The index uses `bits_for_index(plan_table_len)` bits
+// (1 bit for two unique plans, 2 bits for 3-4, etc.), so when every block picks the same
+// plan the per-block cost collapses to one bit per block instead of ~5 bytes.
+//
+// Wire layout:
+//   varint block_count        — number of blocks in the trailer
+//   varint block_size         — common non-last block size
+//   varint plan_table_len     — number of distinct plans (1..=block_count)
+//   per plan in the table:
+//     kind_index u8            (6 bits used via kind_to_compact_index)
+//     varint period
+//     varint head
+//   bit-stream:
+//     for each block: plan_index in `bits_for_index(plan_table_len)` bits, MSB-first
+//   padding bits up to the next byte boundary
+fn multi_block_unique_plans(plan: &MultiBlockPlan) -> Vec<CircuitTransformPlan> {
+    let mut unique: Vec<CircuitTransformPlan> = Vec::with_capacity(plan.plans.len());
     for entry in &plan.plans {
-        size += 1 /* kind index byte */
+        if !unique.iter().any(|existing| existing == entry) {
+            unique.push(*entry);
+        }
+    }
+    unique
+}
+
+fn multi_block_index_bits(plan_table_len: usize) -> u32 {
+    bits_for_index(plan_table_len.max(1))
+}
+
+fn multi_block_section_size(plan: &MultiBlockPlan) -> usize {
+    let unique = multi_block_unique_plans(plan);
+    let mut size = varint_u64_len(plan.plans.len() as u64)
+        + varint_u64_len(plan.block_size as u64)
+        + varint_u64_len(unique.len() as u64);
+    for entry in &unique {
+        size += 1 /* kind_index byte */
             + varint_u64_len(entry.period as u64)
             + varint_u64_len(entry.head as u64);
     }
+    let bit_width = multi_block_index_bits(unique.len()) as usize;
+    let bit_len = bit_width * plan.plans.len();
+    size += (bit_len + 7) / 8;
     size
 }
 
@@ -763,7 +803,8 @@ fn write_recursive_circuit_dictionary(out: &mut Vec<u8>, stream: &RecursiveCircu
     out.extend_from_slice(&stream.zlib_header);
     out.extend_from_slice(&stream.zlib_adler32);
     push_varint_u64(out, stream.plain_len as u64);
-    push_varint_u64(out, stream.transformed_encoded_len as u64);
+    // transformed_encoded_len is intentionally omitted — see comment on
+    // recursive_circuit_fixed_section_size.
     push_varint_u64(out, stream.correction_plain_len as u64);
     push_varint_u64(out, stream.correction_encoded_len as u64);
     // codec_kind u16: see the comment on recursive_circuit_fixed_section_size for the
@@ -834,16 +875,31 @@ fn write_recursive_circuit_dictionary(out: &mut Vec<u8>, stream: &RecursiveCircu
     if let Some(mb) = &stream.multi_block {
         push_varint_u64(out, mb.plans.len() as u64);
         push_varint_u64(out, mb.block_size as u64);
-        for plan in &mb.plans {
-            // Use the same compact kind-index mapping as the topology / fixed section so
-            // every per-plan slot spends 1 byte (6 bits real payload) instead of u8 +
-            // u32 + u32 = 9 bytes. Period/head are usually small (head <= 8, periods up
-            // to ~6400 for image strides) so varint encoding squeezes them into 1-2 bytes.
+        let unique = multi_block_unique_plans(mb);
+        push_varint_u64(out, unique.len() as u64);
+        for plan in &unique {
+            // Plan table — written once per pack regardless of how many blocks reference
+            // each plan. This is the atlas-style dedup: repeated circuits no longer cost
+            // bytes per occurrence, just one bit-width-sized index per block.
             let kind_u8 = plan.kind.as_u8();
             let kind_index = kind_to_compact_index(kind_u8).unwrap_or(kind_u8 & 0x3F);
             out.push(kind_index);
             push_varint_u64(out, plan.period as u64);
             push_varint_u64(out, plan.head as u64);
+        }
+        // Per-block plan index bit stream. Index width is exactly
+        // ceil(log2(unique.len())) — 0 bits if only one unique plan, 1 bit for two, etc.
+        let bit_width = multi_block_index_bits(unique.len());
+        if bit_width > 0 {
+            let mut bw = BitWriter::with_capacity(((bit_width as usize) * mb.plans.len() + 7) / 8);
+            for plan in &mb.plans {
+                let idx = unique
+                    .iter()
+                    .position(|existing| existing == plan)
+                    .expect("multi_block_unique_plans was built from these same plans");
+                bw.write_bits(idx as u64, bit_width);
+            }
+            out.extend_from_slice(&bw.into_bytes());
         }
     }
 }
@@ -895,9 +951,20 @@ fn decode_recursive_circuit_payload(
     zlib_adler32.copy_from_slice(zlib_adler_slice);
 
     let plain_len = read_varint_u64(dict_bytes, &mut dict_cursor)? as usize;
-    let transformed_encoded_len = read_varint_u64(dict_bytes, &mut dict_cursor)? as usize;
     let correction_plain_len = read_varint_u64(dict_bytes, &mut dict_cursor)? as usize;
     let correction_encoded_len = read_varint_u64(dict_bytes, &mut dict_cursor)? as usize;
+    // transformed_encoded_len is not stored on the wire — it is exactly
+    // `payload.len() - correction_encoded_len`. We validate the relationship below.
+    let transformed_encoded_len =
+        payload
+            .len()
+            .checked_sub(correction_encoded_len)
+            .ok_or_else(|| {
+                ZbitError::Parse(
+                    "recursive-circuit-xz correction_encoded_len exceeds payload length"
+                        .to_string(),
+                )
+            })?;
     let codec_kind = read_u16(dict_bytes, &mut dict_cursor)?;
     let transformed_codec =
         PayloadCodec::from_u8(((codec_kind & 0x03) as u8) & 0x07).ok_or_else(|| {
@@ -1100,8 +1167,19 @@ fn decode_recursive_circuit_payload(
                 "recursive-circuit-xz multi-block extension has zero block size".to_string(),
             ));
         }
-        block_plans.reserve(block_count);
-        for _ in 0..block_count {
+        // Plan dictionary: each unique transform plan appears once. Per-block we read a
+        // tiny index into this table from a bit stream — that is the actual "classic
+        // dictionary compression through repeated circuits" the format now does, applied
+        // at the multi-block level.
+        let plan_table_len = read_varint_u64(dict_bytes, &mut dict_cursor)? as usize;
+        if plan_table_len == 0 || plan_table_len > block_count {
+            return Err(ZbitError::Parse(format!(
+                "recursive-circuit-xz multi-block plan table size {plan_table_len} is \
+                 invalid (must be 1..={block_count})"
+            )));
+        }
+        let mut plan_table: Vec<CircuitTransformPlan> = Vec::with_capacity(plan_table_len);
+        for _ in 0..plan_table_len {
             let kind_index = read_u8(dict_bytes, &mut dict_cursor)?;
             let kind_u8 = compact_index_to_kind(kind_index).ok_or_else(|| {
                 ZbitError::Parse(format!(
@@ -1115,7 +1193,37 @@ fn decode_recursive_circuit_payload(
             })?;
             let period = read_varint_u64(dict_bytes, &mut dict_cursor)? as u32;
             let head = read_varint_u64(dict_bytes, &mut dict_cursor)? as u32;
-            block_plans.push(CircuitTransformPlan { kind, period, head });
+            plan_table.push(CircuitTransformPlan { kind, period, head });
+        }
+        let bit_width = multi_block_index_bits(plan_table_len);
+        block_plans.reserve(block_count);
+        if bit_width == 0 {
+            // All blocks point at the single plan — no per-block index bits on the wire.
+            for _ in 0..block_count {
+                block_plans.push(plan_table[0]);
+            }
+        } else {
+            let bit_len = (bit_width as usize) * block_count;
+            let bit_bytes = (bit_len + 7) / 8;
+            let bit_buf = dict_bytes
+                .get(dict_cursor..dict_cursor + bit_bytes)
+                .ok_or_else(|| {
+                    ZbitError::Parse(
+                        "recursive-circuit-xz multi-block index bit stream out of bounds"
+                            .to_string(),
+                    )
+                })?;
+            let mut br = BitReader::new(bit_buf);
+            for _ in 0..block_count {
+                let idx = br.read_bits(bit_width)? as usize;
+                if idx >= plan_table_len {
+                    return Err(ZbitError::Parse(format!(
+                        "recursive-circuit-xz multi-block plan index {idx} exceeds table {plan_table_len}"
+                    )));
+                }
+                block_plans.push(plan_table[idx]);
+            }
+            dict_cursor += bit_bytes;
         }
     }
 

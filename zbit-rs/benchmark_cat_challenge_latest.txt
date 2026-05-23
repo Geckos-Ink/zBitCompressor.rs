@@ -1,11 +1,11 @@
 zBit-rs Real File Benchmark Report
-Generated: 2026-05-23 13:20:43
+Generated: 2026-05-23 17:16:07
 Input file: assets/cat_challenge.png
 Compressed artifact: /tmp/cat.zbpk
 
 Active profile: balanced
 Selected method: recursive-circuit-xz
-Selection reason: recursive-circuit-xz improves size: 2969433 -> 2670580 bytes
+Selection reason: recursive-circuit-xz improves size: 2969433 -> 2670576 bytes
 Circuit evaluation rule: symbol width <= 8 bits: raw dictionary is denser than circuit descriptors
 
 Skipped candidates:
@@ -20,32 +20,32 @@ Raw-deflate candidate size (bytes): 2969865
 Raw-zstd candidate size (bytes): 2969508
 Raw-xz candidate size (bytes): 2969633
 Framed-raw candidate size (bytes): 2965104
-Recursive-circuit-xz candidate size (bytes): 2670580
+Recursive-circuit-xz candidate size (bytes): 2670576
 Monotonic-delta candidate size (bytes): unavailable
 Adaptive-transformed-xz candidate size (bytes): unavailable
 
 Original size (bytes): 2969404
-Compressed size (bytes): 2670571
-Compression ratio (compressed/original): 0.899363
+Compressed size (bytes): 2670567
+Compression ratio (compressed/original): 0.899361
 Space savings (%): 10.06
 
-Compression time (ms): 58945.348
-Decompression time (ms): 498.847
-Compression throughput (MiB/s): 0.048
-Decompression throughput (MiB/s): 5.677
+Compression time (ms): 60747.618
+Decompression time (ms): 491.711
+Compression throughput (MiB/s): 0.047
+Decompression throughput (MiB/s): 5.759
 
 Candidate timing breakdown (ms):
-- index stream build: 82.374
-- huffman stream build: 86.714
-- raw-deflate encode: 58.928
-- raw-zstd encode: 204.923
-- raw-xz encode: 1353.806
-- framed extraction: 2.787
-- recursive preflate search: 1488.991
-- recursive transform sampling: 174.293
-- recursive transform evaluation: 37475.098
-- recursive correction modeling: 2087.531
-- recursive total: 57128.327
+- index stream build: 89.606
+- huffman stream build: 89.289
+- raw-deflate encode: 57.977
+- raw-zstd encode: 219.134
+- raw-xz encode: 60288.958
+- framed extraction: 2.468
+- recursive preflate search: 1494.189
+- recursive transform sampling: 174.606
+- recursive transform evaluation: 38124.010
+- recursive correction modeling: 1925.790
+- recursive total: 58316.248
 - candidate validation: 0.000
 
 Cache stats:

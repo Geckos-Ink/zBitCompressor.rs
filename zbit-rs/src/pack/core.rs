@@ -1504,10 +1504,15 @@ fn compress_adaptive_to_bytes(input: &[u8]) -> ZbitResult<(Vec<u8>, PackStats)> 
     context.timings.raw_zstd_ms = raw_zstd_timer.elapsed().as_secs_f64() * 1000.0;
     let raw_zstd_candidate_bytes = Some(ZBPK_HEADER_BYTES + raw_zstd_payload.len());
 
+    // First a cheap raw-xz estimate (preset 3, no tuning matrix). Used as a gate for the
+    // adaptive-transformed-xz path AND, more importantly, as a fast way to decide whether
+    // running the full raw-xz tuning matrix is worth it. On a 95 MiB PyTorch model the
+    // full matrix walks ~5-10 minutes; if we can prove from the cheap estimate that
+    // adaptive will win by a wide margin, we skip the matrix entirely and use the cheap
+    // payload as the raw-xz candidate (which then loses selection to adaptive anyway).
     let raw_xz_timer = Instant::now();
-    let raw_xz_payload = build_raw_xz_payload(input, &mut context)?;
-    context.timings.raw_xz_ms = raw_xz_timer.elapsed().as_secs_f64() * 1000.0;
-    let raw_xz_candidate_bytes = Some(ZBPK_HEADER_BYTES + raw_xz_payload.len());
+    let raw_xz_cheap_payload = xz_encode_easy_preset(input, 3)?;
+    let raw_xz_cheap_size = raw_xz_cheap_payload.len();
 
     if !context.profile.enable_xz_extreme_for_raw_xz() {
         context.push_skipped(format!(
@@ -1544,8 +1549,25 @@ fn compress_adaptive_to_bytes(input: &[u8]) -> ZbitResult<(Vec<u8>, PackStats)> 
         input,
         &mut context,
         recursive_stream.is_some(),
-        Some(raw_xz_payload.len()),
+        Some(raw_xz_cheap_size),
     )?;
+
+    // Now decide whether the full raw-xz tuning matrix is worth the cost. Skip when
+    // adaptive clearly wins (at least 1 KiB ahead of the cheap raw-xz estimate); in that
+    // case the cheap payload is used as the raw-xz candidate and will lose selection to
+    // adaptive. This is the time win we previously had to pay for unconditionally.
+    let raw_xz_payload = match adaptive_xz_stream.as_ref() {
+        Some(adaptive) if adaptive.payload.len() + 1024 < raw_xz_cheap_size => {
+            context.push_skipped(
+                "raw-xz full tuning matrix skipped: adaptive-transformed-xz clearly wins"
+                    .to_string(),
+            );
+            raw_xz_cheap_payload
+        }
+        _ => build_raw_xz_payload(input, &mut context)?,
+    };
+    context.timings.raw_xz_ms = raw_xz_timer.elapsed().as_secs_f64() * 1000.0;
+    let raw_xz_candidate_bytes = Some(ZBPK_HEADER_BYTES + raw_xz_payload.len());
     let adaptive_transformed_xz_candidate_bytes = adaptive_xz_stream.as_ref().map(|stream| {
         ZBPK_HEADER_BYTES + adaptive_transformed_xz_dictionary_size(stream) + stream.payload.len()
     });

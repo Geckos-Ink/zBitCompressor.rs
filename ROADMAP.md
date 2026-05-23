@@ -2,6 +2,54 @@
 
 _Last updated: 2026-05-23_
 
+## Honest Note on Dictionary Compaction Limits (v3 retrospective)
+
+After landing the v3 format (ZBPK_VERSION = 3) with bit-packed everything — topology
+nodes, framed dict, recursive-circuit fixed section, multi-block plan dictionary,
+adaptive-transformed-xz dict, monotonic-delta dict — the **total dictionary footprint
+on cat is now ~110 bytes out of 2 670 567 byte compressed output**, i.e. ~0.004 %.
+Further header-level bit-packing cannot meaningfully change the ratio. The XZ-compressed
+payload (and the CABAC-coded correction stream for preflate paths) is >99.99 % of every
+file we ship.
+
+Concretely, the per-corpus ceiling for dictionary compaction is:
+
+| Corpus | Compressed file | Dictionary footprint | Hard ceiling for further header work |
+|---|---:|---:|---:|
+| paper | 20 561 B | ~17 B header, no method dict | < 17 B (4-byte magic, 2-byte version, ...) |
+| primary.3b | 562 799 B | ~17 B header + ~12 B monotonic-delta dict | ~10 B saveable, ~0.002 % ratio |
+| cat | 2 670 567 B | ~17 B header + ~25 B recursive fixed + ~15 B framed + ~13 B topology bits | ~50 B saveable, ~0.002 % ratio |
+| depth_anything | ~83 MB | ~17 B header + ~10 B adaptive-xz dict | ~10 B saveable, ~0 % ratio |
+
+**To actually move ratio, the payload must change.** The three real levers, in order of
+implementation feasibility:
+
+1. **Cross-region atlas for repeated circuits** (the long-running ROADMAP target). When
+   distant byte ranges share a generation rule (same transform + parameters + small
+   residual), store the rule once and reference it from multiple positions. This was the
+   user's "classic dictionary compression through repeated circuits" request. The
+   multi-block plan dictionary added in v3 is the first concrete step — it deduplicates
+   plans across blocks within one pack, paying `ceil(log2(unique_plans))` bits per block
+   instead of repeating each plan's `(kind, period, head)` tuple. The next step is a
+   pack-wide circuit atlas that works across both single-pack regions and multiple stream
+   blocks.
+
+2. **Container-aware paths** for known input shapes. For PNGs we already do this through
+   `recursive-circuit-xz` (deflate-aware via preflate). The same shape applied to other
+   containers — ZIP-wrapped PyTorch checkpoints, MP4 tracks, ELF sections — would let us
+   parse the structure, split metadata from bulk weights/data, and run targeted
+   compression (e.g. float-bit-plane separation for tensor weights). Estimated win:
+   5-25 % on the matching corpus.
+
+3. **Replace XZ with a context-adaptive entropy coder tuned for the typical
+   transformed-payload distribution.** This is a major undertaking (months of work) and
+   the expected win vs LZMA2 is modest (a few percent) on general data. Not the right
+   first investment.
+
+Dictionary-level micro-compaction continues to be a useful **principle** — the format
+should never spend bytes on bits the enumerations don't need — but the next ROADMAP
+items that actually move ratio are payload-level, not header-level.
+
 ## Recent Landed Items
 
 - **N1 row-aware predictors** — implemented (see N1 entry below). Available but does not
