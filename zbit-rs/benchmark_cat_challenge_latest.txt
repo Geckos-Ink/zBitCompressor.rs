@@ -1,5 +1,5 @@
 zBit-rs Real File Benchmark Report
-Generated: 2026-05-23 08:00:07
+Generated: 2026-05-23 12:02:03
 Input file: assets/cat_challenge.png
 Compressed artifact: /tmp/cat.zbpk
 
@@ -9,6 +9,7 @@ Selection reason: recursive-circuit-xz improves size: 2969440 -> 2670718 bytes
 Circuit evaluation rule: symbol width <= 8 bits: raw dictionary is denser than circuit descriptors
 
 Skipped candidates:
+- adaptive-transformed-xz skipped: recursive-circuit-xz already covers transform search
 - indexed-circuit skipped: symbol width <= 8 bits: raw dictionary is denser than circuit descriptors
 
 Raw candidate size (bytes): 2969440
@@ -21,29 +22,30 @@ Raw-xz candidate size (bytes): 2969640
 Framed-raw candidate size (bytes): 2965124
 Recursive-circuit-xz candidate size (bytes): 2670718
 Monotonic-delta candidate size (bytes): unavailable
+Adaptive-transformed-xz candidate size (bytes): unavailable
 
 Original size (bytes): 2969404
 Compressed size (bytes): 2670718
 Compression ratio (compressed/original): 0.899412
 Space savings (%): 10.06
 
-Compression time (ms): 58026.069
-Decompression time (ms): 470.830
-Compression throughput (MiB/s): 0.049
-Decompression throughput (MiB/s): 6.015
+Compression time (ms): 61947.550
+Decompression time (ms): 600.080
+Compression throughput (MiB/s): 0.046
+Decompression throughput (MiB/s): 4.719
 
 Candidate timing breakdown (ms):
-- index stream build: 83.547
-- huffman stream build: 85.901
-- raw-deflate encode: 57.588
-- raw-zstd encode: 203.002
-- raw-xz encode: 1370.387
-- framed extraction: 220.455
-- recursive preflate search: 1518.850
-- recursive transform sampling: 186.999
-- recursive transform evaluation: 37979.292
-- recursive correction modeling: 1479.436
-- recursive total: 55993.211
+- index stream build: 91.434
+- huffman stream build: 117.607
+- raw-deflate encode: 62.207
+- raw-zstd encode: 242.657
+- raw-xz encode: 1673.267
+- framed extraction: 225.487
+- recursive preflate search: 1668.387
+- recursive transform sampling: 230.268
+- recursive transform evaluation: 37821.009
+- recursive correction modeling: 2263.319
+- recursive total: 59515.959
 - candidate validation: 0.000
 
 Cache stats:

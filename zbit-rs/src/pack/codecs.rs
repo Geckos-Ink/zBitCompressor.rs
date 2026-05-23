@@ -222,6 +222,77 @@ fn monotonic_delta_dictionary_size(_stream: &MonotonicDeltaStream) -> usize {
     MONOTONIC_DELTA_DICT_BYTES
 }
 
+// Dictionary layout for AdaptiveTransformedXz:
+//   transform_kind u8
+//   period         u32
+//   head           u32
+//   codec          u8
+//   plain_len      u64
+// Total = 1 + 4 + 4 + 1 + 8 = 18 bytes.
+const ADAPTIVE_TRANSFORMED_XZ_DICT_BYTES: usize = 18;
+
+fn adaptive_transformed_xz_dictionary_size(_stream: &AdaptiveTransformedXzStream) -> usize {
+    ADAPTIVE_TRANSFORMED_XZ_DICT_BYTES
+}
+
+fn write_adaptive_transformed_xz_dictionary(
+    out: &mut Vec<u8>,
+    stream: &AdaptiveTransformedXzStream,
+) {
+    out.push(stream.transform_plan.kind.as_u8());
+    push_u32(out, stream.transform_plan.period);
+    push_u32(out, stream.transform_plan.head);
+    out.push(stream.codec.as_u8());
+    push_u64(out, stream.plain_len);
+}
+
+fn decode_adaptive_transformed_xz_payload(
+    dict_bytes: &[u8],
+    payload: &[u8],
+    original_size: usize,
+) -> ZbitResult<Vec<u8>> {
+    if dict_bytes.len() != ADAPTIVE_TRANSFORMED_XZ_DICT_BYTES {
+        return Err(ZbitError::Parse(format!(
+            "adaptive-transformed-xz dictionary size must be {ADAPTIVE_TRANSFORMED_XZ_DICT_BYTES} bytes"
+        )));
+    }
+    let mut cursor = 0usize;
+    let kind_u8 = read_u8(dict_bytes, &mut cursor)?;
+    let kind = CircuitTransformKind::from_u8(kind_u8).ok_or_else(|| {
+        ZbitError::Parse("adaptive-transformed-xz dictionary has invalid transform kind".to_string())
+    })?;
+    let period = read_u32(dict_bytes, &mut cursor)?;
+    let head = read_u32(dict_bytes, &mut cursor)?;
+    let codec = PayloadCodec::from_u8(read_u8(dict_bytes, &mut cursor)?).ok_or_else(|| {
+        ZbitError::Parse("adaptive-transformed-xz dictionary has invalid codec".to_string())
+    })?;
+    let plain_len = read_u64(dict_bytes, &mut cursor)? as usize;
+    if cursor != dict_bytes.len() {
+        return Err(ZbitError::Parse(
+            "trailing bytes in adaptive-transformed-xz dictionary".to_string(),
+        ));
+    }
+    if plain_len != original_size {
+        return Err(ZbitError::Parse(format!(
+            "adaptive-transformed-xz plain_len {plain_len} does not match original_size {original_size}"
+        )));
+    }
+    let transformed = decode_with_codec(payload, codec, plain_len)?;
+    let plan = CircuitTransformPlan { kind, period, head };
+    let recovered = invert_transform_plan(&transformed, plain_len, &plan).ok_or_else(|| {
+        ZbitError::Parse(
+            "adaptive-transformed-xz inverse transform produced invalid output".to_string(),
+        )
+    })?;
+    if recovered.len() != plain_len {
+        return Err(ZbitError::Parse(format!(
+            "adaptive-transformed-xz output length mismatch: expected {plain_len} got {}",
+            recovered.len()
+        )));
+    }
+    Ok(recovered)
+}
+
 fn write_monotonic_delta_dictionary(out: &mut Vec<u8>, stream: &MonotonicDeltaStream) {
     out.push(stream.width);
     out.push(stream.mode.as_u8());

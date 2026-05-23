@@ -2,6 +2,28 @@
 
 _Last updated: 2026-05-23_
 
+## Recent Landed Items
+
+- **N1 row-aware predictors** — implemented (see N1 entry below). Available but does not
+  win on already-filtered PNG IDAT data.
+- **N3 per-block transform plans** — implemented (see N3 entry below). Format extension is
+  live; ready to win on heterogeneous inputs.
+- **AdaptiveTransformedXz** (new top-level pack method, ROADMAP item *N7*) — implemented.
+  Brings the existing transform-plan-search pipeline to inputs that are *not* framed
+  deflate. Previously, on a corpus like a PyTorch `.pth` model file (PK-ZIP wrapper around
+  pickled float32 tensors), the only winning candidate was plain raw-xz; the periodic /
+  delta transforms our recursive path uses were unreachable because no CRC32-framed run
+  was detected. The new method runs `choose_adaptive_transform_plan` directly on the raw
+  input, picks the best reversible transform plan, encodes the transformed payload with
+  the full codec / tuned-XZ selection, and stores a 18-byte dictionary
+  `(transform_kind, period, head, codec, plain_len)` so the decoder can invert the
+  transform deterministically. The candidate is gated by two heuristics: (a) skip when
+  recursive-circuit-xz is already evaluated (same search would be duplicated), and (b)
+  skip when raw-xz already achieves ratio ≤ 0.30 (high-compression corpora like
+  `primary.3b.bin` get no measurable headroom from the transform plan and the plan-search
+  cost is not worth paying). Test coverage:
+  `pack::tests::adaptive_pack_can_choose_adaptive_transformed_xz_and_roundtrips`.
+
 ## Near-Term Ratio Improvements (Concrete, Pre-Atlas)
 
 The Circuit Atlas described in the rest of this document is the long-term direction. Before
@@ -176,12 +198,13 @@ engineering; modest gain unless preflate is producing redundant references.
 
 ### Ratio Targets Before the Full Atlas
 
-| Corpus | Current | N1 measured | N2/N3 target | Pre-atlas stretch |
-| --- | ---: | ---: | ---: | ---: |
-| `papers/zbit-algorithmsResearch.md` | `0.331855` | `0.331855` (no change) | no regression | `< 0.325` (BWT preproc) |
-| `assets/primary.3b.bin` | `0.174058` | `0.174058` (no change) | no regression | `< 0.170` (gap-stream secondary transform) |
-| cat normal | `0.899412` | `0.899412` (no change – PNG already filters) | `< 0.880` | `< 0.870` |
-| cat stream wide-overfit | `0.899455` | `0.899455` (no change) | `< 0.882` | `< 0.872` |
+| Corpus | Current | N1 measured | N2/N3 measured | AdaptiveTransformedXz measured | Pre-atlas stretch |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `papers/zbit-algorithmsResearch.md` | `0.331855` | unchanged | unchanged | skipped (size gate) | `< 0.325` (BWT preproc) |
+| `assets/primary.3b.bin` | `0.174058` | unchanged | unchanged | skipped (raw-xz gate) | `< 0.170` (gap-stream secondary transform) |
+| cat normal | `0.899412` | unchanged | unchanged (single-plan wins) | skipped (recursive gate) | `< 0.870` |
+| cat stream wide-overfit | `0.899455` | unchanged | unchanged | n/a (stream path) | `< 0.872` |
+| `depth_anything_v2_vits.pth` | raw-xz `0.911471` | n/a | n/a | **`0.840376`** (selected) | `< 0.80` (container-aware) |
 
 N1 did not move the cat ratio because PNG IDAT data carries an already-optimal per-row
 predictor. The path forward for ratio on cat is N2 (typed correction substreams) and N3

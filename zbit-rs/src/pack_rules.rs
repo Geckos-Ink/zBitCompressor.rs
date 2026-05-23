@@ -13,6 +13,13 @@ pub enum PackMethod {
     RecursiveCircuitXz,
     MonotonicDelta,
     RawXz,
+    // Adaptive reversible transform applied to the raw input followed by a codec encode.
+    // Generalises the transform machinery (previously gated behind framed-deflate detection)
+    // to inputs that are not framed deflate — e.g. PyTorch model weights, raw float tensors,
+    // fixed-stride binary tables. Stores `(transform_kind, period, head, codec, plain_len)`
+    // in the dictionary so the decoder can invert the transform and recover the original
+    // bytes.
+    AdaptiveTransformedXz,
 }
 
 impl PackMethod {
@@ -28,6 +35,7 @@ impl PackMethod {
             Self::RecursiveCircuitXz => 7,
             Self::MonotonicDelta => 8,
             Self::RawXz => 9,
+            Self::AdaptiveTransformedXz => 10,
         }
     }
 
@@ -43,6 +51,7 @@ impl PackMethod {
             7 => Some(Self::RecursiveCircuitXz),
             8 => Some(Self::MonotonicDelta),
             9 => Some(Self::RawXz),
+            10 => Some(Self::AdaptiveTransformedXz),
             _ => None,
         }
     }
@@ -59,6 +68,7 @@ impl PackMethod {
             Self::RecursiveCircuitXz => "recursive-circuit-xz",
             Self::MonotonicDelta => "monotonic-delta",
             Self::RawXz => "raw-xz",
+            Self::AdaptiveTransformedXz => "adaptive-transformed-xz",
         }
     }
 }
@@ -81,6 +91,7 @@ pub struct PackEvaluation {
     pub framed_raw_total_bytes: Option<usize>,
     pub recursive_circuit_xz_total_bytes: Option<usize>,
     pub monotonic_delta_total_bytes: Option<usize>,
+    pub adaptive_transformed_xz_total_bytes: Option<usize>,
 
     pub chosen_method: PackMethod,
     pub chosen_reason: String,
@@ -103,6 +114,7 @@ impl PackEvaluation {
             framed_raw_total_bytes: None,
             recursive_circuit_xz_total_bytes: None,
             monotonic_delta_total_bytes: None,
+            adaptive_transformed_xz_total_bytes: None,
             chosen_method: PackMethod::RawCopy,
             chosen_reason: String::new(),
         }
@@ -243,6 +255,17 @@ pub fn choose_best_method(eval: &mut PackEvaluation) {
             best_reason = format!(
                 "monotonic-delta improves size: {} -> {} bytes",
                 eval.raw_total_bytes, monotonic_delta_size
+            );
+        }
+    }
+
+    if let Some(adaptive_size) = eval.adaptive_transformed_xz_total_bytes {
+        if adaptive_size < best_size {
+            best_method = PackMethod::AdaptiveTransformedXz;
+            best_size = adaptive_size;
+            best_reason = format!(
+                "adaptive-transformed-xz improves size: {} -> {} bytes",
+                eval.raw_total_bytes, adaptive_size
             );
         }
     }

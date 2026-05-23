@@ -33,6 +33,7 @@ fn compress_stream_realtime_pack_bytes(
         None,
         None,
         None,
+        None,
     )?;
 
     let raw_deflate_bytes = write_pack_bytes(
@@ -43,6 +44,7 @@ fn compress_stream_realtime_pack_bytes(
         0,
         None,
         Some(raw_deflate_payload.as_slice()),
+        None,
         None,
         None,
         None,
@@ -59,6 +61,7 @@ fn compress_stream_realtime_pack_bytes(
         None,
         None,
         Some(raw_zstd_payload.as_slice()),
+        None,
         None,
         None,
         None,
@@ -85,6 +88,7 @@ fn compress_stream_realtime_pack_bytes(
             Some(&framed_run),
             None,
             None,
+            None,
         )?;
         candidates.push((PackMethod::FramedRaw, framed_bytes));
 
@@ -107,6 +111,7 @@ fn compress_stream_realtime_pack_bytes(
                     None,
                     None,
                     Some(&recursive_stream),
+                    None,
                     None,
                 )?;
                 let validation_timer = Instant::now();
@@ -168,6 +173,7 @@ fn compress_stream_wide_overfit_pack_bytes(
         None,
         None,
         None,
+        None,
     )?;
     let raw_deflate_bytes = write_pack_bytes(
         PackMethod::RawDeflate,
@@ -177,6 +183,7 @@ fn compress_stream_wide_overfit_pack_bytes(
         0,
         None,
         Some(raw_deflate_payload.as_slice()),
+        None,
         None,
         None,
         None,
@@ -192,6 +199,7 @@ fn compress_stream_wide_overfit_pack_bytes(
         None,
         None,
         Some(raw_zstd_payload.as_slice()),
+        None,
         None,
         None,
         None,
@@ -218,6 +226,7 @@ fn compress_stream_wide_overfit_pack_bytes(
             Some(&framed_run),
             None,
             None,
+            None,
         )?;
         candidates.push((PackMethod::FramedRaw, framed_bytes));
 
@@ -237,6 +246,7 @@ fn compress_stream_wide_overfit_pack_bytes(
                     None,
                     None,
                     Some(&recursive_stream),
+                    None,
                     None,
                 )?;
                 let validation_timer = Instant::now();

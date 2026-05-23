@@ -21,5 +21,7 @@ target
 #.idea/
 .DS_Store
 assets/cat_challenge.png
+assets/depth_anything_v2_vits.pth
 zbit-rs/*.zbpk
 zbit-rs/*.zbps
+.claude/scheduled_tasks.lock

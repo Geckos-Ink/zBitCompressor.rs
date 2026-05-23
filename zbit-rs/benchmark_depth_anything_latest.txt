@@ -1,0 +1,71 @@
+zBit-rs Real File Benchmark Report
+Generated: 2026-05-23 10:11:35
+Input file: assets/depth_anything_v2_vits.pth
+Compressed artifact: /tmp/depth_anything.zbpk
+
+Active profile: balanced
+Selected method: adaptive-transformed-xz
+Selection reason: adaptive-transformed-xz improves size: 99218470 -> 83380790 bytes
+Circuit evaluation rule: symbol width <= 8 bits: raw dictionary is denser than circuit descriptors
+
+Skipped candidates:
+- recursive-circuit-xz skipped: framed payload analyzer unavailable
+- indexed-circuit skipped: symbol width <= 8 bits: raw dictionary is denser than circuit descriptors
+
+Raw candidate size (bytes): 99218470
+Indexed-raw candidate size (bytes): 99218726
+Indexed-circuit candidate size (bytes): skipped by rules
+Indexed-huffman candidate size (bytes): 92218140
+Raw-deflate candidate size (bytes): 92076344
+Raw-zstd candidate size (bytes): 91967673
+Raw-xz candidate size (bytes): 90414940
+Framed-raw candidate size (bytes): unavailable
+Recursive-circuit-xz candidate size (bytes): unavailable
+Monotonic-delta candidate size (bytes): unavailable
+Adaptive-transformed-xz candidate size (bytes): 83380790
+
+Original size (bytes): 99218434
+Compressed size (bytes): 83380790
+Compression ratio (compressed/original): 0.840376
+Space savings (%): 15.96
+
+Compression time (ms): 5429743.424
+Decompression time (ms): 541.452
+Compression throughput (MiB/s): 0.017
+Decompression throughput (MiB/s): 174.756
+
+Candidate timing breakdown (ms):
+- index stream build: 2521.394
+- huffman stream build: 3465.476
+- raw-deflate encode: 2558.258
+- raw-zstd encode: 24681.741
+- raw-xz encode: 1079689.991
+- framed extraction: 3877752.208
+- recursive preflate search: 0.000
+- recursive transform sampling: 77.202
+- recursive transform evaluation: 282262.022
+- recursive correction modeling: 0.000
+- recursive total: 0.000
+- candidate validation: 0.000
+
+Cache stats:
+- codec hits/misses: 0/0
+- preflate hits/misses: 0/0
+- stream-range hits/misses: 0/0
+
+Resource usage (KiB):
+- RSS before compression: n/a
+- RSS after compression: n/a
+- RSS after decompression: n/a
+- Compression RSS delta: n/a
+- Decompression RSS delta: n/a
+- Peak RSS (VmHWM): n/a
+
+Unique symbols: 256
+Bits per symbol index: 0
+Raw dictionary bytes: 256
+Circuit dictionary bytes: 0
+Huffman dictionary bytes: 0
+Packed index payload bytes: 83380736
+
+Output validation: PASS

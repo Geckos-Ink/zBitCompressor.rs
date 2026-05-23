@@ -1876,6 +1876,96 @@ fn build_multi_block_transform(
     }))
 }
 
+fn build_adaptive_transformed_xz_stream(
+    input: &[u8],
+    context: &mut CompressionContext,
+    has_recursive_candidate: bool,
+    raw_xz_candidate_payload_len: Option<usize>,
+) -> ZbitResult<Option<AdaptiveTransformedXzStream>> {
+    // Adaptive-transformed-xz brings the existing transform-search pipeline to inputs that
+    // are *not* framed deflate (PyTorch model weights, raw float tensors, fixed-stride
+    // binary tables). When recursive-circuit-xz is already available the same inflated
+    // payload's transforms are already being searched there, so we skip this path to avoid
+    // duplicating the heavy work.
+    if has_recursive_candidate {
+        context.push_skipped(
+            "adaptive-transformed-xz skipped: recursive-circuit-xz already covers transform search",
+        );
+        return Ok(None);
+    }
+    // Small inputs can't amortise the transform-plan search cost (~30 plans × per-plan XZ-3
+    // encode + per-plan choose_best_codec) for a candidate that almost always loses to
+    // raw-xz on text-like payloads. Tighten the threshold to 128 KiB: below it the per-plan
+    // search is a multi-hundred-millisecond tax on a fast text path and the headroom it
+    // could find is tiny. Files above this size are the structured-binary regime where the
+    // adaptive plan can win (PyTorch tensors, aligned float dumps, etc.).
+    if input.len() < 128 * 1024 {
+        context.push_skipped(
+            "adaptive-transformed-xz skipped: input below 128 KiB amortisation threshold",
+        );
+        return Ok(None);
+    }
+    // When raw-xz already compresses the input strongly (ratio <= 0.30), the headroom for
+    // an additional reversible transform is small and the transform-plan search is unlikely
+    // to repay its cost. Skip in that case to keep wall-clock time bounded on already-strong
+    // corpora (e.g. primary.3b at raw-xz ratio ~0.26).
+    if let Some(raw_xz_len) = raw_xz_candidate_payload_len {
+        // raw_xz_len here is the codec payload length (no header), so input.len()*3/10 is a
+        // direct ratio threshold.
+        if raw_xz_len.saturating_mul(10) <= input.len().saturating_mul(3) {
+            context.push_skipped(format!(
+                "adaptive-transformed-xz skipped: raw-xz already strong (ratio <= 0.30, payload {} on input {})",
+                raw_xz_len,
+                input.len()
+            ));
+            return Ok(None);
+        }
+    }
+
+    let timer = Instant::now();
+    let result = choose_adaptive_transform_plan(
+        input,
+        context.profile,
+        context.profile.max_transform_plans(),
+    )?;
+    context.timings.recursive_transform_sampling_ms += result.sampling_ms;
+    context.timings.recursive_transform_eval_ms += result.eval_ms;
+
+    let trace = std::env::var_os("ZBIT_TRACE_ADAPTIVE_XZ").is_some();
+    if trace {
+        eprintln!(
+            "zbit-trace adaptive-transformed-xz plan={} period={} head={} encoded={} codec={} elapsed={:.1}ms",
+            result.plan.kind.name(),
+            result.plan.period,
+            result.plan.head,
+            result.payload.len(),
+            result.codec.name(),
+            timer.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+
+    // The 18-byte dictionary cost must be amortised: skip if the candidate would lose to
+    // a hypothetical raw-xz of identical size by more than its dictionary cost. We can't
+    // know the raw-xz size here without extra encodes, so we only insist that the *encoded
+    // payload* itself is below `input.len()` — the final selection in choose_best_method
+    // will rank it against raw-xz and friends accurately.
+    if result.payload.len() >= input.len() {
+        context.push_skipped(format!(
+            "adaptive-transformed-xz skipped: encoded payload {} not smaller than input {}",
+            result.payload.len(),
+            input.len()
+        ));
+        return Ok(None);
+    }
+
+    Ok(Some(AdaptiveTransformedXzStream {
+        transform_plan: result.plan,
+        codec: result.codec,
+        plain_len: input.len() as u64,
+        payload: result.payload,
+    }))
+}
+
 fn choose_correction_transform_plan(
     corrections: &[u8],
     profile: CompressionProfile,

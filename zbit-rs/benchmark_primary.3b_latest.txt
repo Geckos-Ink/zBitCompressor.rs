@@ -1,5 +1,5 @@
 zBit-rs Real File Benchmark Report
-Generated: 2026-05-23 07:59:09
+Generated: 2026-05-23 12:00:55
 Input file: assets/primary.3b.bin
 Compressed artifact: /tmp/p3b.zbpk
 
@@ -10,6 +10,7 @@ Circuit evaluation rule: symbol width <= 8 bits: raw dictionary is denser than c
 
 Skipped candidates:
 - recursive-circuit-xz skipped: framed payload analyzer unavailable
+- adaptive-transformed-xz skipped: raw-xz already strong (ratio <= 0.30, payload 833376 on input 3233613)
 - indexed-circuit skipped: symbol width <= 8 bits: raw dictionary is denser than circuit descriptors
 
 Raw candidate size (bytes): 3233649
@@ -22,24 +23,25 @@ Raw-xz candidate size (bytes): 833412
 Framed-raw candidate size (bytes): unavailable
 Recursive-circuit-xz candidate size (bytes): unavailable
 Monotonic-delta candidate size (bytes): 562836
+Adaptive-transformed-xz candidate size (bytes): unavailable
 
 Original size (bytes): 3233613
 Compressed size (bytes): 562836
 Compression ratio (compressed/original): 0.174058
 Space savings (%): 82.59
 
-Compression time (ms): 4779.996
-Decompression time (ms): 32.056
-Compression throughput (MiB/s): 0.645
-Decompression throughput (MiB/s): 96.200
+Compression time (ms): 6228.829
+Decompression time (ms): 32.513
+Compression throughput (MiB/s): 0.495
+Decompression throughput (MiB/s): 94.848
 
 Candidate timing breakdown (ms):
-- index stream build: 68.407
-- huffman stream build: 78.397
-- raw-deflate encode: 78.865
-- raw-zstd encode: 292.613
-- raw-xz encode: 1104.747
-- framed extraction: 361.507
+- index stream build: 69.041
+- huffman stream build: 79.355
+- raw-deflate encode: 77.767
+- raw-zstd encode: 281.856
+- raw-xz encode: 1667.885
+- framed extraction: 398.640
 - recursive preflate search: 0.000
 - recursive transform sampling: 0.000
 - recursive transform evaluation: 0.000

@@ -506,6 +506,57 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_pack_can_choose_adaptive_transformed_xz_and_roundtrips() {
+        // Synthesize a payload that has stride-4 correlation at the float-tensor level but
+        // whose absolute byte values are noisy enough that raw-xz cannot trivially crush it
+        // (we deliberately keep its ratio above the 0.30 skip-heuristic threshold so the
+        // adaptive-transformed-xz candidate is actually evaluated). Each "row" of four
+        // bytes nudges each column independently by a small signed delta, so adjacent rows
+        // are similar at stride 4 but the per-column byte stream looks pseudo-random.
+        let mut input = Vec::with_capacity(256 * 1024);
+        let mut state: u32 = 0x1357_BD9F;
+        let mut prev: [u8; 4] = [0x12, 0x34, 0x56, 0x78];
+        for _ in 0..(256 * 1024 / 4) {
+            let mut new_word = [0u8; 4];
+            for j in 0..4 {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                // Larger nudge range adds enough byte-level entropy to keep raw-xz from
+                // dropping below the 0.30 ratio gate, so the adaptive path is exercised.
+                let nudge = ((state >> 4) & 0x3F) as i8 - 32;
+                new_word[j] = prev[j].wrapping_add(nudge as u8);
+            }
+            input.extend_from_slice(&new_word);
+            prev = new_word;
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("zbit_pack_adaptive_xz_{stamp}.zbpk"));
+        let stats = compress_adaptive_to_file(&input, &path).expect("compress adaptive");
+        let output = decompress_file(&path).expect("decompress adaptive");
+        let _ = fs::remove_file(&path);
+        assert_eq!(output, input, "adaptive-transformed-xz roundtrip");
+
+        // We do not require adaptive to be the WINNER here (raw-xz could still beat it on
+        // some seeds), but on stride-structured data above the 16-KiB gate and the 0.30
+        // raw-xz heuristic the candidate must at least be evaluated.
+        let raw_xz_size = stats.raw_xz_candidate_bytes.unwrap_or(usize::MAX);
+        if raw_xz_size.saturating_mul(10) > stats.original_size.saturating_mul(3) {
+            assert!(
+                stats.adaptive_transformed_xz_candidate_bytes.is_some(),
+                "adaptive-transformed-xz must be evaluated when raw-xz ratio > 0.30 \
+                 (raw-xz {raw_xz_size} on input {})",
+                stats.original_size
+            );
+        }
+    }
+
+    #[test]
     fn adaptive_pack_evaluates_recursive_circuit_xz_candidate_and_roundtrips() {
         let (input, _filtered_plain) = build_valid_framed_container_with_split_deflate();
 

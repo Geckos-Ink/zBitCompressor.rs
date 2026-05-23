@@ -231,6 +231,7 @@ pub struct PackStats {
     pub framed_raw_candidate_bytes: Option<usize>,
     pub recursive_circuit_xz_candidate_bytes: Option<usize>,
     pub monotonic_delta_candidate_bytes: Option<usize>,
+    pub adaptive_transformed_xz_candidate_bytes: Option<usize>,
 
     pub chosen_method: PackMethod,
     pub chosen_reason: String,
@@ -579,6 +580,14 @@ struct MonotonicDeltaStream {
     mode: MonotonicDeltaMode,
     trailing_zero_shift: u8,
     codec: PayloadCodec,
+    payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct AdaptiveTransformedXzStream {
+    transform_plan: CircuitTransformPlan,
+    codec: PayloadCodec,
+    plain_len: u64,
     payload: Vec<u8>,
 }
 
@@ -1166,6 +1175,7 @@ fn write_pack_bytes(
     framed_run: Option<&FramedPayloadRun>,
     recursive_stream: Option<&RecursiveCircuitStream>,
     monotonic_stream: Option<&MonotonicDeltaStream>,
+    adaptive_xz_stream: Option<&AdaptiveTransformedXzStream>,
 ) -> ZbitResult<Vec<u8>> {
     if stream.unique_symbols.len() > u16::MAX as usize {
         return Err(ZbitError::Limit(
@@ -1250,6 +1260,20 @@ fn write_pack_bytes(
                 monotonic.payload.len(),
             )
         }
+        PackMethod::AdaptiveTransformedXz => {
+            let adaptive = adaptive_xz_stream.ok_or_else(|| {
+                ZbitError::Internal(
+                    "adaptive-transformed-xz stream missing for adaptive-transformed-xz method"
+                        .to_string(),
+                )
+            })?;
+            (
+                0u8,
+                0usize,
+                adaptive_transformed_xz_dictionary_size(adaptive),
+                adaptive.payload.len(),
+            )
+        }
     };
 
     let mut out = Vec::with_capacity(ZBPK_HEADER_BYTES + dict_size + payload_size);
@@ -1326,6 +1350,15 @@ fn write_pack_bytes(
             })?;
             write_monotonic_delta_dictionary(&mut out, monotonic);
         }
+        PackMethod::AdaptiveTransformedXz => {
+            let adaptive = adaptive_xz_stream.ok_or_else(|| {
+                ZbitError::Internal(
+                    "adaptive-transformed-xz stream missing for adaptive-transformed-xz dictionary"
+                        .to_string(),
+                )
+            })?;
+            write_adaptive_transformed_xz_dictionary(&mut out, adaptive);
+        }
     }
 
     match method {
@@ -1383,6 +1416,15 @@ fn write_pack_bytes(
                 )
             })?;
             out.extend_from_slice(&monotonic.payload);
+        }
+        PackMethod::AdaptiveTransformedXz => {
+            let adaptive = adaptive_xz_stream.ok_or_else(|| {
+                ZbitError::Internal(
+                    "adaptive-transformed-xz stream missing for adaptive-transformed-xz payload"
+                        .to_string(),
+                )
+            })?;
+            out.extend_from_slice(&adaptive.payload);
         }
     }
 
@@ -1453,6 +1495,16 @@ fn compress_adaptive_to_bytes(input: &[u8]) -> ZbitResult<(Vec<u8>, PackStats)> 
         ZBPK_HEADER_BYTES + monotonic_delta_dictionary_size(stream) + stream.payload.len()
     });
 
+    let adaptive_xz_stream = build_adaptive_transformed_xz_stream(
+        input,
+        &mut context,
+        recursive_stream.is_some(),
+        Some(raw_xz_payload.len()),
+    )?;
+    let adaptive_transformed_xz_candidate_bytes = adaptive_xz_stream.as_ref().map(|stream| {
+        ZBPK_HEADER_BYTES + adaptive_transformed_xz_dictionary_size(stream) + stream.payload.len()
+    });
+
     let mut eval = PackEvaluation::new();
     eval.original_size = input.len();
     eval.symbol_bits = 8;
@@ -1467,6 +1519,7 @@ fn compress_adaptive_to_bytes(input: &[u8]) -> ZbitResult<(Vec<u8>, PackStats)> 
     eval.framed_raw_total_bytes = framed_raw_candidate_bytes;
     eval.recursive_circuit_xz_total_bytes = recursive_circuit_xz_candidate_bytes;
     eval.monotonic_delta_total_bytes = monotonic_delta_candidate_bytes;
+    eval.adaptive_transformed_xz_total_bytes = adaptive_transformed_xz_candidate_bytes;
 
     let (should_eval_circuit, circuit_rule_note) = should_evaluate_circuit(&eval);
     if !should_eval_circuit {
@@ -1498,6 +1551,7 @@ fn compress_adaptive_to_bytes(input: &[u8]) -> ZbitResult<(Vec<u8>, PackStats)> 
         framed_run.as_ref(),
         recursive_stream.as_ref(),
         monotonic_stream.as_ref(),
+        adaptive_xz_stream.as_ref(),
     )?;
 
     let (bits_per_symbol, payload_bytes, huffman_dictionary_bytes) = match eval.chosen_method {
@@ -1538,6 +1592,14 @@ fn compress_adaptive_to_bytes(input: &[u8]) -> ZbitResult<(Vec<u8>, PackStats)> 
             })?;
             (0u8, monotonic.payload.len(), 0usize)
         }
+        PackMethod::AdaptiveTransformedXz => {
+            let adaptive = adaptive_xz_stream.as_ref().ok_or_else(|| {
+                ZbitError::Internal(
+                    "adaptive-transformed-xz selected without adaptive stream".to_string(),
+                )
+            })?;
+            (0u8, adaptive.payload.len(), 0usize)
+        }
     };
 
     let active_profile = context.profile.name().to_string();
@@ -1564,6 +1626,7 @@ fn compress_adaptive_to_bytes(input: &[u8]) -> ZbitResult<(Vec<u8>, PackStats)> 
         framed_raw_candidate_bytes,
         recursive_circuit_xz_candidate_bytes,
         monotonic_delta_candidate_bytes,
+        adaptive_transformed_xz_candidate_bytes,
         chosen_method: eval.chosen_method,
         chosen_reason: eval.chosen_reason,
         circuit_rule_note,
@@ -1735,6 +1798,15 @@ fn decompress_pack_bytes(bytes: &[u8]) -> ZbitResult<Vec<u8>> {
             }
             return decode_monotonic_delta_payload(dict, payload, original_size);
         }
+        PackMethod::AdaptiveTransformedXz => {
+            if bits_per_symbol != 0 || unique_count != 0 {
+                return Err(ZbitError::Parse(
+                    "adaptive-transformed-xz requires bits_per_symbol=0 and unique_count=0"
+                        .to_string(),
+                ));
+            }
+            return decode_adaptive_transformed_xz_payload(dict, payload, original_size);
+        }
         PackMethod::IndexedHuffman => {
             if bits_per_symbol != 0 {
                 return Err(ZbitError::Parse(
@@ -1764,7 +1836,8 @@ fn decompress_pack_bytes(bytes: &[u8]) -> ZbitResult<Vec<u8>> {
         | PackMethod::RawXz
         | PackMethod::FramedRaw
         | PackMethod::RecursiveCircuitXz
-        | PackMethod::MonotonicDelta => {
+        | PackMethod::MonotonicDelta
+        | PackMethod::AdaptiveTransformedXz => {
             unreachable!()
         }
     };
