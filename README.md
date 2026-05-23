@@ -284,12 +284,14 @@ Current snapshot (reports generated on 2026-05-23):
 
 | Test | Input | Selected method/profile | Original -> Compressed (bytes) | Ratio | Savings | Compression ms | Decompression ms | Validation |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Paper benchmark | `papers/zbit-algorithmsResearch.md` | `raw-xz` | `62015 -> 20580` | `0.331855` | `66.81%` | `122.009` | `0.876` | `PASS` |
-| Primary binary benchmark | `assets/primary.3b.bin` | `monotonic-delta` | `3233613 -> 562836` | `0.174058` | `82.59%` | `4715.248` | `19.225` | `PASS` |
-| Cat challenge benchmark | `assets/cat_challenge.png` | `recursive-circuit-xz` | `2969404 -> 2670718` | `0.899412` | `10.06%` | `60335.199` | `517.834` | `PASS` |
-| Cat challenge stream benchmark | `assets/cat_challenge.png` | `wide-overfit stream` | `2969404 -> 2670846` | `0.899455` | `10.05%` | `111686.005` | `8128.408` | `PASS` |
+| Paper benchmark | `papers/zbit-algorithmsResearch.md` | `raw-xz` | `62015 -> 20580` | `0.331855` | `66.81%` | `101.944` | `0.892` | `PASS` |
+| Primary binary benchmark | `assets/primary.3b.bin` | `monotonic-delta` | `3233613 -> 562836` | `0.174058` | `82.59%` | `4974.434` | `18.917` | `PASS` |
+| Cat challenge benchmark | `assets/cat_challenge.png` | `recursive-circuit-xz` | `2969404 -> 2670718` | `0.899412` | `10.06%` | `59870.238` | `505.213` | `PASS` |
+| Cat challenge stream benchmark | `assets/cat_challenge.png` | `wide-overfit stream` | `2969404 -> 2670846` | `0.899455` | `10.05%` | `112964.407` | `8186.741` | `PASS` |
 
-Compression times are substantially lower than the 2026-05-07 snapshot: paper `313 ms -> 122 ms` (~2.6x faster), primary `16635 ms -> 4715 ms` (~3.5x faster), cat `112500 ms -> 60335 ms` (~1.9x faster), all at byte-identical ratios. The improvement comes from a cheap XZ-3 ranking pass that picks the top-K transform plans before the expensive `choose_best_codec` evaluation, plus a leaner per-plan winner-refinement tuning matrix.
+Compression times are substantially lower than the 2026-05-07 snapshot: paper `313 ms -> 102 ms` (~3.1x faster), primary `16635 ms -> 4974 ms` (~3.3x faster), cat `112500 ms -> 59870 ms` (~1.9x faster), all at byte-identical ratios. The improvement comes from a cheap XZ-3 ranking pass that picks the top-K transform plans before the expensive `choose_best_codec` evaluation, plus a leaner per-plan winner-refinement tuning matrix.
+
+Several new tail-only reversible transforms have been added without changing tracked ratios: `periodic-head-tail-tail-row-delta` / `row-xor` / `row-up` (PNG-style Sub / XOR / Up predictors applied only to the row-data tail), `periodic-head-tail-tail-bit-plane-transpose` (with and without follow-up unary delta), plus deep-search XZ tunings (`depth=2000`/`4000`) gated to the deep / research profiles. They lose the XZ-3 ranking on the already-filtered cat PNG IDAT plain (where the simple `periodic-head-tail` still wins by ~23 KB on XZ-9) but stay available for unfiltered raster payloads where they should win cleanly.
 
 ### Latest Cat Stream Multilevel Profiles
 

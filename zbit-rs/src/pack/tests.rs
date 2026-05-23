@@ -292,6 +292,101 @@ mod tests {
     }
 
     #[test]
+    fn row_aware_transforms_roundtrip() {
+        // Builds a tail with multiple rows so the row-bounded predictors are exercised across
+        // row boundaries. The first row is identity (no predictor reference), subsequent rows
+        // exercise the row-internal predictor (Sub/Xor) and the cross-row Up predictor.
+        let row_len = 17usize; // arbitrary, > all pixel strides we test
+        let period = row_len + 1; // +1 for the head byte
+        let row_count = 12usize;
+        let mut input = Vec::with_capacity(period * row_count);
+        let mut state: u32 = 0xC0FFEE17;
+        for row in 0..row_count {
+            input.push(row as u8); // head byte = row index (filter-byte analogue)
+            for _ in 0..row_len {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                input.push((state >> 24) as u8);
+            }
+        }
+
+        let kinds_with_stride = [
+            CircuitTransformKind::PeriodicHeadTailTailRowDelta,
+            CircuitTransformKind::PeriodicHeadTailTailRowXor,
+        ];
+        for kind in kinds_with_stride {
+            for pixel_stride in [1u32, 2, 3, 4] {
+                let plan = CircuitTransformPlan {
+                    kind,
+                    period: period as u32,
+                    head: pixel_stride,
+                };
+                let transformed = apply_transform_plan(&input, &plan)
+                    .unwrap_or_else(|| panic!("apply {:?} stride={pixel_stride}", kind));
+                let decoded = invert_transform_plan(&transformed, input.len(), &plan)
+                    .unwrap_or_else(|| panic!("invert {:?} stride={pixel_stride}", kind));
+                assert_eq!(decoded, input, "{:?} stride={pixel_stride} roundtrip", kind);
+            }
+        }
+
+        let up_plan = CircuitTransformPlan {
+            kind: CircuitTransformKind::PeriodicHeadTailTailRowUp,
+            period: period as u32,
+            head: 0,
+        };
+        let transformed = apply_transform_plan(&input, &up_plan).expect("apply row-up");
+        let decoded =
+            invert_transform_plan(&transformed, input.len(), &up_plan).expect("invert row-up");
+        assert_eq!(decoded, input, "row-up roundtrip");
+    }
+
+    #[test]
+    fn bit_plane_tail_transforms_roundtrip() {
+        // Mixed-entropy input: a head byte plus a tail with both repetitive low-bit content
+        // and noisier high-bit content, so the bit-plane transpose moves real bits and the
+        // delta has something to extract on top.
+        let row_len = 31usize;
+        let period = row_len + 1;
+        let row_count = 9usize;
+        let mut input = Vec::with_capacity(period * row_count);
+        let mut state: u32 = 0xDEADBEEF;
+        for row in 0..row_count {
+            input.push(row as u8);
+            for col in 0..row_len {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                // Combine pseudo-random and structured patterns so bit planes are non-trivial.
+                let mixed = (state >> 24) as u8 ^ (col as u8) ^ (row as u8).wrapping_mul(11);
+                input.push(mixed);
+            }
+        }
+
+        for kind in [
+            CircuitTransformKind::PeriodicHeadTailTailBitPlaneTranspose,
+            CircuitTransformKind::PeriodicHeadTailTailBitPlaneTransposeDelta,
+        ] {
+            let plan = CircuitTransformPlan {
+                kind,
+                period: period as u32,
+                head: 0,
+            };
+            let transformed = apply_transform_plan(&input, &plan)
+                .unwrap_or_else(|| panic!("apply {:?}", kind));
+            assert_eq!(
+                transformed.len(),
+                input.len(),
+                "{:?} preserves length",
+                kind
+            );
+            let decoded = invert_transform_plan(&transformed, input.len(), &plan)
+                .unwrap_or_else(|| panic!("invert {:?}", kind));
+            assert_eq!(decoded, input, "{:?} roundtrip", kind);
+        }
+    }
+
+    #[test]
     fn adaptive_pack_evaluates_recursive_circuit_xz_candidate_and_roundtrips() {
         let (input, _filtered_plain) = build_valid_framed_container_with_split_deflate();
 

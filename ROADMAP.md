@@ -1,6 +1,172 @@
 # zBit Circuit-Based Compression Roadmap
 
-_Last updated: 2026-05-07_
+_Last updated: 2026-05-23_
+
+## Near-Term Ratio Improvements (Concrete, Pre-Atlas)
+
+The Circuit Atlas described in the rest of this document is the long-term direction. Before
+that lands, several concrete, lower-cost ratio improvements remain on the table for the
+existing `recursive-circuit-xz` path. They are listed here in priority order, with the
+expected impact, what to implement, and the rough cost.
+
+### N1. Row-aware predictor transforms for image-like data (implemented; helps unfiltered raster, not PNG)
+
+The current `periodic-head-tail(period=stride, head=1)` winner on PNG IDAT plain separates
+filter bytes from row data but then encodes the row data as-is. The row data is filtered
+RGBA scanlines: bytes are channel-interleaved (RGBA RGBA RGBA …) and adjacent rows are
+correlated. Vanilla XZ-9 captures some of this but cannot articulate "same channel of
+previous pixel" as a coding primitive.
+
+Implemented in `zbit-rs/src/pack/transforms.rs`:
+
+- `PeriodicHeadTailTailRowDelta(period, pixel_stride)` — for each row of `period-1` bytes
+  in the tail, apply `data[i] - data[i - pixel_stride]` byte-wise (PNG `Sub` filter).
+- `PeriodicHeadTailTailRowXor(period, pixel_stride)` — same shape, XOR instead of delta.
+- `PeriodicHeadTailTailRowUp(period)` — `data[i] - data[i - row_len]` (PNG `Up` filter,
+  cross-row delta within the tail, never touching the filter-byte block).
+- `PeriodicHeadTailTailBitPlaneTranspose(period)` / `…TransposeDelta(period)` — bit-plane
+  transpose only on the tail; targets payloads where high bit planes are mostly homogeneous
+  (signed-small residuals).
+
+Pixel strides probed: 1, 2, 3, 4 (covers gray, RG, RGB, RGBA). Per-row scope ensures the
+predictor never crosses a row boundary and never crosses the head/tail boundary. Forced
+candidates for the discovered top period; XZ-3 ranking drops them quickly when they lose.
+
+**Empirical outcome on the existing corpus:** these candidates *lose* the XZ-3 ranking on
+the cat PNG IDAT plain (predictor scores ~2.88–3.6 MB vs the winning `periodic-head-tail`
+at 2.69 MB at XZ-3, encoding to 2.39 MB vs 2.41 MB at XZ-9). The reason is that PNG IDAT
+already carries the optimal per-row filter (Sub/Up/Average/Paeth chosen at encode time), so
+applying another predictor on top is a *second* filter pass that adds noise instead of
+extracting it.
+
+They remain in the candidate pool because they should still win cleanly on **unfiltered
+raster payloads** (raw RGB/RGBA bitmaps, scientific image dumps, fixed-stride binary tables
+where each row is uncorrelated unfiltered bytes), and the cost when they lose is bounded by
+the XZ-3 quick-rank pass.
+
+Future variant to consider: **filter-aware per-row predictor selection** — choose the
+predictor per row based on the row's PNG filter byte, so rows with `filter=0` (no filter)
+get the predictor while rows with `filter=1..4` are left alone. This would require either a
+new format slot for per-row predictor IDs, or a deterministic mapping from filter byte to
+predictor.
+
+### N2. Typed substreams for preflate corrections (medium impact)
+
+The corrections payload currently encodes as `raw` at 284 093 bytes — neither XZ nor zstd
+can compress it. That is because the underlying preflate corrections are a packed stream
+of (record-tag, payload) tuples interleaved together. Splitting them into typed substreams
+(record-tag stream, literal-correction stream, length-correction stream, distance-correction
+stream, tree-correction stream, fallback bytes) and coding each with the best codec per
+stream should expose redundancy.
+
+Implementation outline:
+
+1. Parse the corrections blob with `preflate-rs` helpers (or reproduce the splitter logic).
+2. For each substream, run the existing `choose_best_codec_cached`.
+3. Serialize substream count + per-stream `(kind, plain_len, encoded_len, codec)` into the
+   recursive dictionary, then concatenate encoded payloads.
+4. Decoder reverses the split and feeds the recovered correction blob to preflate-rs.
+
+Format impact: new dictionary section (length-prefixed list of typed substreams). Bump
+`.zbpk` minor version if the format is otherwise rigid; otherwise gate on a new flag.
+
+Risk: requires understanding preflate-rs internal correction record layout. If preflate-rs
+exposes only an opaque blob, fall back to a structural splitter (scan for record-type bytes
+and split on them).
+
+Expected impact on cat: 20–80 KB depending on substream entropy. Generalizes to any
+recursive-circuit-xz input with non-trivial corrections.
+
+### N3. Per-block (block-local) transform plans inside a single pack (medium impact)
+
+Today `recursive-circuit-xz` selects one transform plan for the whole inflated payload.
+Image data often has scanline batches with different best transforms (smooth regions vs
+high-frequency regions). Splitting the tail into N equal blocks, picking the best transform
+per block, and storing per-block plan IDs would let each block use the locally best plan.
+
+Implementation outline:
+
+1. Split tail into N blocks (start with N = 4 or 8).
+2. Run `choose_adaptive_transform_plan` on each block independently (with the cheap XZ-3
+   ranking already in place).
+3. Concatenate transformed blocks; encode as one XZ stream (so dictionary matches still
+   cross block boundaries).
+4. Dictionary stores `block_count`, then per-block `(transform_kind, period, head)`.
+5. Decoder iterates blocks, inverting per-block transforms.
+
+Format impact: new dictionary section. Bump `.zbpk` minor version.
+
+Risk: per-block transforms can hurt XZ matches across blocks; the per-block transform must
+either be very local (no shift) or all blocks must agree. Start with same-period transforms
+across blocks (only vary kind), then loosen.
+
+Expected impact on cat: 30–80 KB; larger on heterogeneous images. Cost: ~Nx the transform
+eval time, but the cheap XZ-3 ranking keeps total under control.
+
+### N4. LZMA delta filter via xz2 / direct lzma-sys (medium impact)
+
+We already added an inert `delta_dist` field to `XzTuningParams`. The xz2 crate does not
+expose `Filters::delta()`, but the LZMA delta filter is in the xz Utils binary and the
+lzma-sys crate. Two options:
+
+1. Vendor a minimal patch to xz2 exposing `delta(dist)`.
+2. Drop to the lzma-sys raw API and build the filter chain manually.
+
+The delta filter combined with LZMA2 historically wins 1–5 % on PNG-decoded plain because
+it gives LZMA2 access to channel-aware residual coding.
+
+Expected impact: another 1–3 % on top of N1 if both are kept; partial overlap.
+
+### N5. Wider tuned XZ matrix and BCJ filters (low/uncertain impact)
+
+The current `tuned_xz_param_matrix()` covers `lc/lp/pb`, dict size, nice_len, match_finder.
+Add a few candidates with `Mode::Fast` (some payloads compress better with greedy than
+optimal parser) and BCJ filters (`x86`, `arm`) for binary-rich payloads. Most non-binary
+payloads ignore BCJ, so probe only when the input has executable signatures.
+
+Expected impact: <1 % on cat; potentially larger on disassembled binaries that aren't in
+our corpus today.
+
+### N6. Cross-correlation between transformed payload and corrections (low impact, research)
+
+When preflate corrections derive from the same deflate stream we already decoded, parts of
+the correction stream sometimes overlap byte-for-byte with the transformed payload (e.g.
+literal corrections that quote bytes already present elsewhere). A small offset table that
+references back into the transformed payload could replace those bytes. Significant
+engineering; modest gain unless preflate is producing redundant references.
+
+### Ratio Targets Before the Full Atlas
+
+| Corpus | Current | N1 measured | N2/N3 target | Pre-atlas stretch |
+| --- | ---: | ---: | ---: | ---: |
+| `papers/zbit-algorithmsResearch.md` | `0.331855` | `0.331855` (no change) | no regression | `< 0.325` (BWT preproc) |
+| `assets/primary.3b.bin` | `0.174058` | `0.174058` (no change) | no regression | `< 0.170` (gap-stream secondary transform) |
+| cat normal | `0.899412` | `0.899412` (no change – PNG already filters) | `< 0.880` | `< 0.870` |
+| cat stream wide-overfit | `0.899455` | `0.899455` (no change) | `< 0.882` | `< 0.872` |
+
+N1 did not move the cat ratio because PNG IDAT data carries an already-optimal per-row
+predictor. The path forward for ratio on cat is N2 (typed correction substreams) and N3
+(per-block transform plans), or — for already-filtered payloads where local transforms
+are exhausted — the full Circuit Atlas (cross-region nonlocal references and shared
+dictionaries).
+
+These pre-atlas targets are intentionally conservative: they capture what is reachable
+without changing the dictionary format beyond a minor version bump. Anything beyond
+`< 0.85` on cat realistically requires the full Circuit Atlas.
+
+### Sequencing Recommendation
+
+1. Land **N1** behind the existing budgets (cheap, format-compatible, isolated risk).
+2. Use the trace flag (`ZBIT_TRACE_RECURSIVE=1`) to verify the new row predictors win on
+   the cat plan ranking; if not, prune the variants before merging.
+3. Land **N2** behind a `.zbpk` minor version bump; reuse existing `choose_best_codec_cached`
+   plumbing per substream.
+4. Evaluate **N3** vs **N4**: pick whichever delivers more measured ratio on the corpus.
+5. Re-baseline ratio targets; revisit Circuit Atlas only after N1–N4 are settled.
+
+The rest of this document describes the long-term Circuit Atlas direction.
+
+---
 
 ## Purpose
 

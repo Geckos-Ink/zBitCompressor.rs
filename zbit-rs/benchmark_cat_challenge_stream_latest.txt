@@ -1,5 +1,5 @@
 zBit-rs Stream Benchmark Report
-Generated: 2026-05-23 00:21:04
+Generated: 2026-05-23 07:28:30
 Input file: /Users/riccardo/Sources/GitHub/zBitCompressor.rs/assets/cat_challenge.png
 Compressed artifact: /Users/riccardo/Sources/GitHub/zBitCompressor.rs/zbit-rs/benchmark_cat_challenge_stream.zbps
 
@@ -32,8 +32,8 @@ Compressed size (bytes): 2670846
 Compression ratio (compressed/original): 0.899455
 Space savings (%): 10.05
 
-Compression time (ms): 111686.005
-Decompression time (ms): 8228.301
+Compression time (ms): 112964.407
+Decompression time (ms): 8236.757
 Compression throughput (MiB/s): 0.025
 Decompression throughput (MiB/s): 0.344
 
@@ -41,14 +41,14 @@ Candidate timing breakdown (ms):
 - raw-deflate encode: 0.000
 - raw-zstd encode: 0.000
 - framed extraction: 0.000
-- recursive preflate search: 36941.305
-- recursive transform sampling: 1831.761
-- recursive transform evaluation: 41358.164
-- recursive correction modeling: 4279.980
-- recursive total: 101765.450
-- stream global/shared payload build: 111615.102
+- recursive preflate search: 37303.186
+- recursive transform sampling: 1768.662
+- recursive transform evaluation: 41422.655
+- recursive correction modeling: 3864.158
+- recursive total: 103114.144
+- stream global/shared payload build: 112890.752
 - stream block planning: 0.000
-- candidate validation: 8313.182
+- candidate validation: 8221.258
 
 Cache stats:
 - codec hits/misses: 0/0

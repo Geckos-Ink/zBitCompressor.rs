@@ -332,6 +332,18 @@ enum CircuitTransformKind {
     PeriodicHeadTailTailXor,
     PeriodicHeadTailDelta,
     PeriodicHeadTailXor,
+    // Row-aware predictors operate on the tail of `periodic-head-tail(period, head=1)`,
+    // treating each row of `period-1` bytes independently. They never cross row boundaries
+    // and never touch the gathered head/filter-byte run.
+    PeriodicHeadTailTailRowDelta, // PNG-style Sub filter inside each row, distance = `head`
+    PeriodicHeadTailTailRowXor,   // same, XOR variant for bit-flipped row neighbours
+    PeriodicHeadTailTailRowUp,    // PNG-style Up filter: subtract the same byte in previous row
+    // Bit-plane operations on the tail of `periodic-head-tail(period, head=1)`. The head
+    // (filter-byte run) is left as bytes; only the tail is transposed bit-plane-wise. For
+    // filtered scanline residuals the high bit planes are mostly homogeneous (sign of small
+    // residual), so the transposed tail compresses much better with XZ.
+    PeriodicHeadTailTailBitPlaneTranspose,
+    PeriodicHeadTailTailBitPlaneTransposeDelta,
 }
 
 impl CircuitTransformKind {
@@ -355,6 +367,15 @@ impl CircuitTransformKind {
             Self::PeriodicHeadTailTailXor => "periodic-head-tail-tail-xor",
             Self::PeriodicHeadTailDelta => "periodic-head-tail-delta",
             Self::PeriodicHeadTailXor => "periodic-head-tail-xor",
+            Self::PeriodicHeadTailTailRowDelta => "periodic-head-tail-tail-row-delta",
+            Self::PeriodicHeadTailTailRowXor => "periodic-head-tail-tail-row-xor",
+            Self::PeriodicHeadTailTailRowUp => "periodic-head-tail-tail-row-up",
+            Self::PeriodicHeadTailTailBitPlaneTranspose => {
+                "periodic-head-tail-tail-bit-plane-transpose"
+            }
+            Self::PeriodicHeadTailTailBitPlaneTransposeDelta => {
+                "periodic-head-tail-tail-bit-plane-transpose-delta"
+            }
         }
     }
 
@@ -378,6 +399,11 @@ impl CircuitTransformKind {
             Self::PeriodicHeadTailTailXor => 13,
             Self::PeriodicHeadTailDelta => 14,
             Self::PeriodicHeadTailXor => 15,
+            Self::PeriodicHeadTailTailRowDelta => 18,
+            Self::PeriodicHeadTailTailRowXor => 19,
+            Self::PeriodicHeadTailTailRowUp => 20,
+            Self::PeriodicHeadTailTailBitPlaneTranspose => 21,
+            Self::PeriodicHeadTailTailBitPlaneTransposeDelta => 22,
         }
     }
 
@@ -395,6 +421,11 @@ impl CircuitTransformKind {
             7 => Some(Self::PeriodicXor),
             8 => Some(Self::PeriodicGatherDelta),
             9 => Some(Self::PeriodicGatherXor),
+            18 => Some(Self::PeriodicHeadTailTailRowDelta),
+            19 => Some(Self::PeriodicHeadTailTailRowXor),
+            20 => Some(Self::PeriodicHeadTailTailRowUp),
+            21 => Some(Self::PeriodicHeadTailTailBitPlaneTranspose),
+            22 => Some(Self::PeriodicHeadTailTailBitPlaneTransposeDelta),
             10 => Some(Self::PeriodicHeadTailTailGather),
             11 => Some(Self::PeriodicHeadTailTailGatherDelta),
             12 => Some(Self::PeriodicHeadTailTailDelta),

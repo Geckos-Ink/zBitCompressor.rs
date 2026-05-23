@@ -1,5 +1,5 @@
 zBit-rs Real File Benchmark Report
-Generated: 2026-05-23 00:18:36
+Generated: 2026-05-23 07:25:40
 Input file: assets/cat_challenge.png
 Compressed artifact: /tmp/cat.zbpk
 
@@ -27,23 +27,23 @@ Compressed size (bytes): 2670718
 Compression ratio (compressed/original): 0.899412
 Space savings (%): 10.06
 
-Compression time (ms): 60335.199
-Decompression time (ms): 517.834
+Compression time (ms): 59870.238
+Decompression time (ms): 491.359
 Compression throughput (MiB/s): 0.047
-Decompression throughput (MiB/s): 5.469
+Decompression throughput (MiB/s): 5.763
 
 Candidate timing breakdown (ms):
-- index stream build: 79.568
-- huffman stream build: 86.584
-- raw-deflate encode: 58.932
-- raw-zstd encode: 205.083
-- raw-xz encode: 1320.612
-- framed extraction: 217.117
-- recursive preflate search: 1503.687
-- recursive transform sampling: 187.837
-- recursive transform evaluation: 38908.832
-- recursive correction modeling: 1615.287
-- recursive total: 58354.692
+- index stream build: 84.651
+- huffman stream build: 86.714
+- raw-deflate encode: 57.546
+- raw-zstd encode: 205.164
+- raw-xz encode: 1825.990
+- framed extraction: 230.297
+- recursive preflate search: 1678.513
+- recursive transform sampling: 197.422
+- recursive transform evaluation: 37826.838
+- recursive correction modeling: 1711.930
+- recursive total: 57363.527
 - candidate validation: 0.000
 
 Cache stats:

@@ -782,6 +782,32 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             depth: 0,
             delta_dist: 0,
         },
+        // Deeper-search variants: raise the LZMA hash-chain search depth above the preset 9
+        // default (~1000). Slower per-encode but can find longer back-references in payloads
+        // with global motifs (image scanlines). Cost-gated by the deep/research budgets so
+        // balanced does not pay this slowdown.
+        XzTuningParams {
+            literal_context_bits: 3,
+            literal_position_bits: 0,
+            position_bits: 2,
+            dict_size: 64 * 1024 * 1024,
+            nice_len: 273,
+            match_finder: MatchFinder::BinaryTree4,
+            mode: Mode::Normal,
+            depth: 2000,
+            delta_dist: 0,
+        },
+        XzTuningParams {
+            literal_context_bits: 3,
+            literal_position_bits: 0,
+            position_bits: 0,
+            dict_size: 64 * 1024 * 1024,
+            nice_len: 273,
+            match_finder: MatchFinder::BinaryTree4,
+            mode: Mode::Normal,
+            depth: 4000,
+            delta_dist: 0,
+        },
         // Delta pre-filter variants: useful for fixed-stride structured payloads such as
         // channel-interleaved image bytes (RGB=3, RGBA=4) or 16/32-bit aligned binary tables.
         // The delta filter computes `out[i] = data[i] - data[i - dist]` byte-wise, then LZMA2
@@ -856,13 +882,32 @@ fn delta_xz_budget(_profile: CompressionProfile) -> (usize, usize) {
     (0, 0)
 }
 
+fn deep_search_xz_budget(profile: CompressionProfile) -> (usize, usize) {
+    // (normal_deep_budget, extreme_deep_budget): how many of the trailing deep-search tunings
+    // (depth > preset default) to probe. Off for fast/balanced because each candidate roughly
+    // doubles per-encode time; deep/research can afford one or two for the chance of finding a
+    // longer back-reference in image-like payloads with global motifs.
+    match profile {
+        CompressionProfile::Fast | CompressionProfile::Balanced => (0, 0),
+        CompressionProfile::Deep => (2, 1),
+        CompressionProfile::Research => (2, 2),
+    }
+}
+
 fn build_tuned_xz_candidates(
     profile: CompressionProfile,
     allow_xz_extreme: bool,
 ) -> Vec<XzCodecCandidate> {
     let (normal_budget, extreme_budget) = tuned_xz_budget(profile);
     let (normal_delta_budget, extreme_delta_budget) = delta_xz_budget(profile);
+    let (normal_deep_budget, extreme_deep_budget) = deep_search_xz_budget(profile);
     let tuning = tuned_xz_param_matrix();
+    // Standard tunings end where the first deep-search (depth > 0) entry begins. Delta
+    // entries follow the deep-search entries.
+    let deep_first_idx = tuning
+        .iter()
+        .position(|entry| entry.depth > 0)
+        .unwrap_or(tuning.len());
     let delta_first_idx = tuning
         .iter()
         .position(|entry| entry.delta_dist >= 1)
@@ -879,7 +924,23 @@ fn build_tuned_xz_candidates(
     });
     rank += 1;
 
-    for params in tuning.iter().copied().take(delta_first_idx).take(normal_budget) {
+    for params in tuning.iter().copied().take(deep_first_idx).take(normal_budget) {
+        out.push(XzCodecCandidate {
+            rank,
+            codec: PayloadCodec::Xz,
+            preset: 9u32,
+            kind: XzCandidateKind::Tuned(params),
+        });
+        rank += 1;
+    }
+
+    for params in tuning
+        .iter()
+        .copied()
+        .skip(deep_first_idx)
+        .take(delta_first_idx.saturating_sub(deep_first_idx))
+        .take(normal_deep_budget)
+    {
         out.push(XzCodecCandidate {
             rank,
             codec: PayloadCodec::Xz,
@@ -909,7 +970,23 @@ fn build_tuned_xz_candidates(
         });
         rank += 1;
 
-        for params in tuning.iter().copied().take(delta_first_idx).take(extreme_budget) {
+        for params in tuning.iter().copied().take(deep_first_idx).take(extreme_budget) {
+            out.push(XzCodecCandidate {
+                rank,
+                codec: PayloadCodec::XzExtreme,
+                preset: extreme,
+                kind: XzCandidateKind::Tuned(params),
+            });
+            rank += 1;
+        }
+
+        for params in tuning
+            .iter()
+            .copied()
+            .skip(deep_first_idx)
+            .take(delta_first_idx.saturating_sub(deep_first_idx))
+            .take(extreme_deep_budget)
+        {
             out.push(XzCodecCandidate {
                 rank,
                 codec: PayloadCodec::XzExtreme,

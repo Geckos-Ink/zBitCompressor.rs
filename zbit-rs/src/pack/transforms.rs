@@ -349,6 +349,312 @@ fn invert_head_tail_tail_xor(
     invert_periodic_head_tail(&merged, original_len, period, 1)
 }
 
+fn apply_head_tail_tail_row_delta(
+    data: &[u8],
+    period: usize,
+    pixel_stride: usize,
+) -> Option<Vec<u8>> {
+    // periodic-head-tail with head=1 separates the per-period leading byte (e.g. the PNG
+    // filter byte) into a contiguous block; we then walk the tail row-by-row and apply a
+    // byte-wise delta with `pixel_stride` distance inside each row, never crossing rows.
+    if period < 2 || pixel_stride < 1 || pixel_stride >= period {
+        return None;
+    }
+    let head_tail = apply_periodic_head_tail(data, period, 1)?;
+    let total_head = periodic_head_bytes(data.len(), period, 1)?;
+    let head_stream = head_tail.get(..total_head)?;
+    let tail_stream = head_tail.get(total_head..)?;
+    let row_len = period - 1;
+    let mut tail_out = Vec::with_capacity(tail_stream.len());
+    let mut cursor = 0usize;
+    while cursor < tail_stream.len() {
+        let end = (cursor + row_len).min(tail_stream.len());
+        let row = &tail_stream[cursor..end];
+        for (i, &b) in row.iter().enumerate() {
+            if i < pixel_stride {
+                tail_out.push(b);
+            } else {
+                tail_out.push(b.wrapping_sub(row[i - pixel_stride]));
+            }
+        }
+        cursor = end;
+    }
+    let mut out = Vec::with_capacity(data.len());
+    out.extend_from_slice(head_stream);
+    out.extend_from_slice(&tail_out);
+    Some(out)
+}
+
+fn invert_head_tail_tail_row_delta(
+    data: &[u8],
+    original_len: usize,
+    period: usize,
+    pixel_stride: usize,
+) -> Option<Vec<u8>> {
+    if data.len() != original_len || period < 2 || pixel_stride < 1 || pixel_stride >= period {
+        return None;
+    }
+    let total_head = periodic_head_bytes(original_len, period, 1)?;
+    let head_stream = data.get(..total_head)?;
+    let tail_stream = data.get(total_head..)?;
+    let row_len = period - 1;
+    let mut tail_out = Vec::with_capacity(tail_stream.len());
+    let mut cursor = 0usize;
+    while cursor < tail_stream.len() {
+        let end = (cursor + row_len).min(tail_stream.len());
+        let row = &tail_stream[cursor..end];
+        let row_start = tail_out.len();
+        for (i, &b) in row.iter().enumerate() {
+            if i < pixel_stride {
+                tail_out.push(b);
+            } else {
+                let prev = tail_out[row_start + i - pixel_stride];
+                tail_out.push(b.wrapping_add(prev));
+            }
+        }
+        cursor = end;
+    }
+    let mut merged = Vec::with_capacity(original_len);
+    merged.extend_from_slice(head_stream);
+    merged.extend_from_slice(&tail_out);
+    invert_periodic_head_tail(&merged, original_len, period, 1)
+}
+
+fn apply_head_tail_tail_row_xor(
+    data: &[u8],
+    period: usize,
+    pixel_stride: usize,
+) -> Option<Vec<u8>> {
+    if period < 2 || pixel_stride < 1 || pixel_stride >= period {
+        return None;
+    }
+    let head_tail = apply_periodic_head_tail(data, period, 1)?;
+    let total_head = periodic_head_bytes(data.len(), period, 1)?;
+    let head_stream = head_tail.get(..total_head)?;
+    let tail_stream = head_tail.get(total_head..)?;
+    let row_len = period - 1;
+    let mut tail_out = Vec::with_capacity(tail_stream.len());
+    let mut cursor = 0usize;
+    while cursor < tail_stream.len() {
+        let end = (cursor + row_len).min(tail_stream.len());
+        let row = &tail_stream[cursor..end];
+        for (i, &b) in row.iter().enumerate() {
+            if i < pixel_stride {
+                tail_out.push(b);
+            } else {
+                tail_out.push(b ^ row[i - pixel_stride]);
+            }
+        }
+        cursor = end;
+    }
+    let mut out = Vec::with_capacity(data.len());
+    out.extend_from_slice(head_stream);
+    out.extend_from_slice(&tail_out);
+    Some(out)
+}
+
+fn invert_head_tail_tail_row_xor(
+    data: &[u8],
+    original_len: usize,
+    period: usize,
+    pixel_stride: usize,
+) -> Option<Vec<u8>> {
+    if data.len() != original_len || period < 2 || pixel_stride < 1 || pixel_stride >= period {
+        return None;
+    }
+    let total_head = periodic_head_bytes(original_len, period, 1)?;
+    let head_stream = data.get(..total_head)?;
+    let tail_stream = data.get(total_head..)?;
+    let row_len = period - 1;
+    let mut tail_out = Vec::with_capacity(tail_stream.len());
+    let mut cursor = 0usize;
+    while cursor < tail_stream.len() {
+        let end = (cursor + row_len).min(tail_stream.len());
+        let row = &tail_stream[cursor..end];
+        let row_start = tail_out.len();
+        for (i, &b) in row.iter().enumerate() {
+            if i < pixel_stride {
+                tail_out.push(b);
+            } else {
+                let prev = tail_out[row_start + i - pixel_stride];
+                tail_out.push(b ^ prev);
+            }
+        }
+        cursor = end;
+    }
+    let mut merged = Vec::with_capacity(original_len);
+    merged.extend_from_slice(head_stream);
+    merged.extend_from_slice(&tail_out);
+    invert_periodic_head_tail(&merged, original_len, period, 1)
+}
+
+fn apply_head_tail_tail_row_up(data: &[u8], period: usize, _unused: usize) -> Option<Vec<u8>> {
+    // PNG-style Up filter applied to the tail of `periodic-head-tail(period, head=1)`.
+    // out[row][col] = tail[row][col] - tail[row-1][col]. The first row is unchanged.
+    if period < 2 {
+        return None;
+    }
+    let head_tail = apply_periodic_head_tail(data, period, 1)?;
+    let total_head = periodic_head_bytes(data.len(), period, 1)?;
+    let head_stream = head_tail.get(..total_head)?;
+    let tail_stream = head_tail.get(total_head..)?;
+    let row_len = period - 1;
+    let mut tail_out = vec![0u8; tail_stream.len()];
+    let mut prev_row_start = 0usize;
+    let mut cursor = 0usize;
+    let mut first_row = true;
+    while cursor < tail_stream.len() {
+        let end = (cursor + row_len).min(tail_stream.len());
+        let row = &tail_stream[cursor..end];
+        if first_row {
+            tail_out[cursor..end].copy_from_slice(row);
+            prev_row_start = cursor;
+            first_row = false;
+        } else {
+            for (i, &b) in row.iter().enumerate() {
+                let prev_in_row = tail_stream.get(prev_row_start + i).copied();
+                tail_out[cursor + i] = match prev_in_row {
+                    Some(p) => b.wrapping_sub(p),
+                    None => b,
+                };
+            }
+            prev_row_start = cursor;
+        }
+        cursor = end;
+    }
+    let mut out = Vec::with_capacity(data.len());
+    out.extend_from_slice(head_stream);
+    out.extend_from_slice(&tail_out);
+    Some(out)
+}
+
+fn invert_head_tail_tail_row_up(
+    data: &[u8],
+    original_len: usize,
+    period: usize,
+    _unused: usize,
+) -> Option<Vec<u8>> {
+    if data.len() != original_len || period < 2 {
+        return None;
+    }
+    let total_head = periodic_head_bytes(original_len, period, 1)?;
+    let head_stream = data.get(..total_head)?;
+    let tail_stream = data.get(total_head..)?;
+    let row_len = period - 1;
+    let mut tail_out = vec![0u8; tail_stream.len()];
+    let mut prev_row_start = 0usize;
+    let mut cursor = 0usize;
+    let mut first_row = true;
+    while cursor < tail_stream.len() {
+        let end = (cursor + row_len).min(tail_stream.len());
+        let row = &tail_stream[cursor..end];
+        if first_row {
+            tail_out[cursor..end].copy_from_slice(row);
+            prev_row_start = cursor;
+            first_row = false;
+        } else {
+            for (i, &b) in row.iter().enumerate() {
+                let prev_in_row = tail_out.get(prev_row_start + i).copied();
+                tail_out[cursor + i] = match prev_in_row {
+                    Some(p) => b.wrapping_add(p),
+                    None => b,
+                };
+            }
+            prev_row_start = cursor;
+        }
+        cursor = end;
+    }
+    let mut merged = Vec::with_capacity(original_len);
+    merged.extend_from_slice(head_stream);
+    merged.extend_from_slice(&tail_out);
+    invert_periodic_head_tail(&merged, original_len, period, 1)
+}
+
+fn apply_head_tail_tail_bit_plane_transpose(
+    data: &[u8],
+    period: usize,
+) -> Option<Vec<u8>> {
+    // periodic-head-tail(period, head=1) then bit-plane transpose ONLY on the tail.
+    // The head (filter-byte run for PNG-like inputs) is already low-entropy as bytes; we
+    // leave it untouched. The tail is the bulk of the data — filtered scanline residuals
+    // tend to live near 0 with the high (sign) bit either clearing for positive small
+    // values or filling for negative small ones, so bit-plane transposing the tail clusters
+    // each plane separately and the high planes typically become long zero runs that LZ77
+    // matches across easily.
+    if period < 2 {
+        return None;
+    }
+    let head_tail = apply_periodic_head_tail(data, period, 1)?;
+    let total_head = periodic_head_bytes(data.len(), period, 1)?;
+    let head_stream = head_tail.get(..total_head)?;
+    let tail_stream = head_tail.get(total_head..)?;
+    let tail_transposed = apply_bit_plane_transpose(tail_stream);
+    let mut out = Vec::with_capacity(data.len());
+    out.extend_from_slice(head_stream);
+    out.extend_from_slice(&tail_transposed);
+    Some(out)
+}
+
+fn invert_head_tail_tail_bit_plane_transpose(
+    data: &[u8],
+    original_len: usize,
+    period: usize,
+) -> Option<Vec<u8>> {
+    if data.len() != original_len || period < 2 {
+        return None;
+    }
+    let total_head = periodic_head_bytes(original_len, period, 1)?;
+    let head_stream = data.get(..total_head)?;
+    let tail_stream = data.get(total_head..)?;
+    let tail_len = tail_stream.len();
+    let tail_recovered = invert_bit_plane_transpose(tail_stream, tail_len)?;
+    let mut merged = Vec::with_capacity(original_len);
+    merged.extend_from_slice(head_stream);
+    merged.extend_from_slice(&tail_recovered);
+    invert_periodic_head_tail(&merged, original_len, period, 1)
+}
+
+fn apply_head_tail_tail_bit_plane_transpose_delta(
+    data: &[u8],
+    period: usize,
+) -> Option<Vec<u8>> {
+    // Same shape as the plain bit-plane-transpose variant, but with an additional unary
+    // delta on the transposed tail. The combination targets the case where each bit plane
+    // has correlated runs but with small in-plane gradients.
+    if period < 2 {
+        return None;
+    }
+    let head_tail = apply_periodic_head_tail(data, period, 1)?;
+    let total_head = periodic_head_bytes(data.len(), period, 1)?;
+    let head_stream = head_tail.get(..total_head)?;
+    let tail_stream = head_tail.get(total_head..)?;
+    let tail_transposed = apply_bit_plane_transpose(tail_stream);
+    let tail_delta = apply_unary_delta(&tail_transposed);
+    let mut out = Vec::with_capacity(data.len());
+    out.extend_from_slice(head_stream);
+    out.extend_from_slice(&tail_delta);
+    Some(out)
+}
+
+fn invert_head_tail_tail_bit_plane_transpose_delta(
+    data: &[u8],
+    original_len: usize,
+    period: usize,
+) -> Option<Vec<u8>> {
+    if data.len() != original_len || period < 2 {
+        return None;
+    }
+    let total_head = periodic_head_bytes(original_len, period, 1)?;
+    let head_stream = data.get(..total_head)?;
+    let tail_stream = data.get(total_head..)?;
+    let tail_undeltaed = invert_unary_delta(tail_stream);
+    let tail_recovered = invert_bit_plane_transpose(&tail_undeltaed, tail_undeltaed.len())?;
+    let mut merged = Vec::with_capacity(original_len);
+    merged.extend_from_slice(head_stream);
+    merged.extend_from_slice(&tail_recovered);
+    invert_periodic_head_tail(&merged, original_len, period, 1)
+}
+
 fn apply_head_tail_delta(data: &[u8], period: usize, head: usize) -> Option<Vec<u8>> {
     let head_tail = apply_periodic_head_tail(data, period, head)?;
     Some(apply_unary_delta(&head_tail))
@@ -473,6 +779,21 @@ fn apply_transform_plan(data: &[u8], plan: &CircuitTransformPlan) -> Option<Vec<
         CircuitTransformKind::PeriodicHeadTailXor => {
             apply_head_tail_xor(data, plan.period as usize, plan.head as usize)
         }
+        CircuitTransformKind::PeriodicHeadTailTailRowDelta => {
+            apply_head_tail_tail_row_delta(data, plan.period as usize, plan.head as usize)
+        }
+        CircuitTransformKind::PeriodicHeadTailTailRowXor => {
+            apply_head_tail_tail_row_xor(data, plan.period as usize, plan.head as usize)
+        }
+        CircuitTransformKind::PeriodicHeadTailTailRowUp => {
+            apply_head_tail_tail_row_up(data, plan.period as usize, plan.head as usize)
+        }
+        CircuitTransformKind::PeriodicHeadTailTailBitPlaneTranspose => {
+            apply_head_tail_tail_bit_plane_transpose(data, plan.period as usize)
+        }
+        CircuitTransformKind::PeriodicHeadTailTailBitPlaneTransposeDelta => {
+            apply_head_tail_tail_bit_plane_transpose_delta(data, plan.period as usize)
+        }
     }
 }
 
@@ -580,6 +901,34 @@ fn invert_transform_plan(
         }
         CircuitTransformKind::PeriodicHeadTailXor => {
             invert_head_tail_xor(data, original_len, plan.period as usize, plan.head as usize)
+        }
+        CircuitTransformKind::PeriodicHeadTailTailRowDelta => invert_head_tail_tail_row_delta(
+            data,
+            original_len,
+            plan.period as usize,
+            plan.head as usize,
+        ),
+        CircuitTransformKind::PeriodicHeadTailTailRowXor => invert_head_tail_tail_row_xor(
+            data,
+            original_len,
+            plan.period as usize,
+            plan.head as usize,
+        ),
+        CircuitTransformKind::PeriodicHeadTailTailRowUp => invert_head_tail_tail_row_up(
+            data,
+            original_len,
+            plan.period as usize,
+            plan.head as usize,
+        ),
+        CircuitTransformKind::PeriodicHeadTailTailBitPlaneTranspose => {
+            invert_head_tail_tail_bit_plane_transpose(data, original_len, plan.period as usize)
+        }
+        CircuitTransformKind::PeriodicHeadTailTailBitPlaneTransposeDelta => {
+            invert_head_tail_tail_bit_plane_transpose_delta(
+                data,
+                original_len,
+                plan.period as usize,
+            )
         }
     }
 }
@@ -869,6 +1218,82 @@ fn build_topology_for_plan(plan: &CircuitTransformPlan) -> ZbitResult<Vec<Circui
             let split_id = push_topology_node(&mut nodes, root_id, 0, 0, 4, plan.period, plan.head);
             let _ = push_topology_node(&mut nodes, split_id, 0, 0, 18, 1, 0);
         }
+        CircuitTransformKind::PeriodicHeadTailTailRowDelta => {
+            let split_id = push_topology_node(&mut nodes, root_id, 0, 0, 4, plan.period, 1);
+            let _ = push_topology_node(&mut nodes, split_id, 1, 0, 10, 1, 0);
+            let tail_id = push_topology_node(
+                &mut nodes,
+                split_id,
+                1,
+                1,
+                11,
+                plan.period.saturating_sub(1),
+                0,
+            );
+            // node kind 22 = row-bounded delta with `param_a` = pixel_stride.
+            let _ = push_topology_node(&mut nodes, tail_id, 0, 0, 22, plan.head, 0);
+        }
+        CircuitTransformKind::PeriodicHeadTailTailRowXor => {
+            let split_id = push_topology_node(&mut nodes, root_id, 0, 0, 4, plan.period, 1);
+            let _ = push_topology_node(&mut nodes, split_id, 1, 0, 10, 1, 0);
+            let tail_id = push_topology_node(
+                &mut nodes,
+                split_id,
+                1,
+                1,
+                11,
+                plan.period.saturating_sub(1),
+                0,
+            );
+            // node kind 23 = row-bounded xor with `param_a` = pixel_stride.
+            let _ = push_topology_node(&mut nodes, tail_id, 0, 0, 23, plan.head, 0);
+        }
+        CircuitTransformKind::PeriodicHeadTailTailRowUp => {
+            let split_id = push_topology_node(&mut nodes, root_id, 0, 0, 4, plan.period, 1);
+            let _ = push_topology_node(&mut nodes, split_id, 1, 0, 10, 1, 0);
+            let tail_id = push_topology_node(
+                &mut nodes,
+                split_id,
+                1,
+                1,
+                11,
+                plan.period.saturating_sub(1),
+                0,
+            );
+            // node kind 24 = row-bounded Up filter (cross-row predictor).
+            let _ = push_topology_node(&mut nodes, tail_id, 0, 0, 24, 0, 0);
+        }
+        CircuitTransformKind::PeriodicHeadTailTailBitPlaneTranspose => {
+            let split_id = push_topology_node(&mut nodes, root_id, 0, 0, 4, plan.period, 1);
+            let _ = push_topology_node(&mut nodes, split_id, 1, 0, 10, 1, 0);
+            let tail_id = push_topology_node(
+                &mut nodes,
+                split_id,
+                1,
+                1,
+                11,
+                plan.period.saturating_sub(1),
+                0,
+            );
+            // node kind 25 = bit-plane transpose applied only on the tail.
+            let _ = push_topology_node(&mut nodes, tail_id, 0, 0, 25, 8, 0);
+        }
+        CircuitTransformKind::PeriodicHeadTailTailBitPlaneTransposeDelta => {
+            let split_id = push_topology_node(&mut nodes, root_id, 0, 0, 4, plan.period, 1);
+            let _ = push_topology_node(&mut nodes, split_id, 1, 0, 10, 1, 0);
+            let tail_id = push_topology_node(
+                &mut nodes,
+                split_id,
+                1,
+                1,
+                11,
+                plan.period.saturating_sub(1),
+                0,
+            );
+            // node kind 26 = bit-plane transpose then unary delta, tail-only.
+            let bit_id = push_topology_node(&mut nodes, tail_id, 0, 0, 25, 8, 0);
+            let _ = push_topology_node(&mut nodes, bit_id, 0, 0, 26, 1, 0);
+        }
     }
 
     finalize_topology_hashes(&mut nodes)?;
@@ -1150,6 +1575,62 @@ fn choose_adaptive_transform_plan(
                     if selected_set.insert(forced) {
                         selected.push(forced);
                     }
+                }
+            }
+
+            // Bit-plane-transpose-on-tail variants: parameter-free, so we always force them
+            // for the discovered top period. They cost one extra slot in the candidate pool;
+            // the XZ-3 ranking will drop them quickly if the data is not bit-plane-friendly.
+            for forced_kind in [
+                CircuitTransformKind::PeriodicHeadTailTailBitPlaneTranspose,
+                CircuitTransformKind::PeriodicHeadTailTailBitPlaneTransposeDelta,
+            ] {
+                let forced = CircuitTransformPlan {
+                    kind: forced_kind,
+                    period: period_u32,
+                    head: 0,
+                };
+                if selected_set.insert(forced) {
+                    selected.push(forced);
+                }
+            }
+
+            // Row-aware predictors (PNG-like): try canonical pixel strides for the discovered
+            // top period. These never cross the tail row boundary so they preserve the
+            // structure that vanilla LZMA2 finds, while exposing same-channel-previous-pixel
+            // correlation as a coding primitive. They help on unfiltered raster data (raw RGB
+            // bitmaps, scientific image dumps) but typically lose against the simpler
+            // `periodic-head-tail head=1` on already-filtered PNG IDAT payloads — so gate the
+            // extra candidates behind deep/research to keep the balanced budget tight.
+            if matches!(
+                profile,
+                CompressionProfile::Deep | CompressionProfile::Research
+            ) {
+                for pixel_stride in [1u32, 2, 3, 4] {
+                    if pixel_stride < period_u32 {
+                        for forced_kind in [
+                            CircuitTransformKind::PeriodicHeadTailTailRowDelta,
+                            CircuitTransformKind::PeriodicHeadTailTailRowXor,
+                        ] {
+                            let forced = CircuitTransformPlan {
+                                kind: forced_kind,
+                                period: period_u32,
+                                head: pixel_stride,
+                            };
+                            if selected_set.insert(forced) {
+                                selected.push(forced);
+                            }
+                        }
+                    }
+                }
+                // Row Up filter has no pixel stride (acts on entire rows): store with head=0.
+                let row_up = CircuitTransformPlan {
+                    kind: CircuitTransformKind::PeriodicHeadTailTailRowUp,
+                    period: period_u32,
+                    head: 0,
+                };
+                if selected_set.insert(row_up) {
+                    selected.push(row_up);
                 }
             }
         }
