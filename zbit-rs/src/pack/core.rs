@@ -92,6 +92,20 @@ impl CompressionProfile {
         }
     }
 
+    fn multi_block_split_counts(self) -> &'static [u32] {
+        // Block counts to probe for the N3 multi-block recursive-circuit path. Each count
+        // is an N where the inflated plain is split into N consecutive blocks, each block
+        // picks its own best transform plan, and the concatenated transformed bytes go
+        // through a single codec encode. Off entirely for fast/balanced because plan
+        // search per block is expensive; deep/research probe a small set and the winner
+        // is selected by total compressed size.
+        match self {
+            Self::Fast | Self::Balanced => &[],
+            Self::Deep => &[2, 4],
+            Self::Research => &[2, 4, 8],
+        }
+    }
+
     fn correction_transform_plan_budget(self) -> usize {
         match self {
             Self::Fast => 4,
@@ -509,6 +523,19 @@ struct RecursiveCircuitStream {
     zlib_adler32: [u8; 4],
     transform_plan: CircuitTransformPlan,
     topology: Vec<CircuitTopologyNode>,
+    // Multi-block extension (N3 in ROADMAP). `None` keeps the legacy single-plan layout.
+    // When `Some`, the inflated plain was split into `plans.len()` consecutive blocks; each
+    // block of size `block_size` (last block may be shorter) was transformed with its own
+    // plan and the transformed payloads were concatenated before codec encoding.
+    multi_block: Option<MultiBlockPlan>,
+}
+
+#[derive(Debug, Clone)]
+struct MultiBlockPlan {
+    // Size of every non-last block. The last block may be shorter when plain_len is not an
+    // exact multiple of block_size; its size is `plain_len - block_size * (plans.len() - 1)`.
+    block_size: u32,
+    plans: Vec<CircuitTransformPlan>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

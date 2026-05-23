@@ -387,6 +387,125 @@ mod tests {
     }
 
     #[test]
+    fn multi_block_apply_invert_roundtrip() {
+        // Focused unit test for the N3 multi-block apply/invert logic without going through
+        // the full preflate roundtrip. We synthesize a plain payload with two regions that
+        // prefer different plans, apply per-block plans, concatenate, then invert each block
+        // and check that we recover the original payload byte-for-byte. This exercises the
+        // exact code path the decoder uses for multi-block streams.
+        let mut region_a = Vec::with_capacity(8 * 128);
+        for row in 0..128u8 {
+            region_a.push(row); // "filter byte"
+            for col in 0..7u8 {
+                region_a.push(col.wrapping_mul(11).wrapping_add(row & 0x07));
+            }
+        }
+        let mut region_b = Vec::with_capacity(8 * 128);
+        let mut state: u32 = 0xDEAD_FACE;
+        for _ in 0..region_b.capacity() {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            region_b.push(state as u8);
+        }
+        let mut plain = Vec::with_capacity(region_a.len() + region_b.len());
+        plain.extend_from_slice(&region_a);
+        plain.extend_from_slice(&region_b);
+        let plain_len = plain.len();
+        assert_eq!(plain_len % 2, 0);
+        let block_size = (plain_len / 2) as u32;
+
+        let plan_a = CircuitTransformPlan {
+            kind: CircuitTransformKind::PeriodicHeadTail,
+            period: 8,
+            head: 1,
+        };
+        let plan_b = CircuitTransformPlan {
+            kind: CircuitTransformKind::Identity,
+            period: 0,
+            head: 0,
+        };
+        let transformed_a = apply_transform_plan(&plain[..block_size as usize], &plan_a)
+            .expect("apply plan A");
+        let transformed_b = apply_transform_plan(&plain[block_size as usize..], &plan_b)
+            .expect("apply plan B");
+        assert_eq!(transformed_a.len(), block_size as usize);
+        assert_eq!(transformed_b.len(), plain_len - block_size as usize);
+        let mut concat = Vec::with_capacity(plain.len());
+        concat.extend_from_slice(&transformed_a);
+        concat.extend_from_slice(&transformed_b);
+        assert_eq!(concat.len(), plain_len);
+
+        // Reverse the same logic the decoder applies in the multi-block branch.
+        let plans = [plan_a, plan_b];
+        let block_count = plans.len();
+        let leading_bytes = (block_size as usize) * (block_count - 1);
+        let last_block_len = plain_len - leading_bytes;
+        let mut recovered = Vec::with_capacity(plain_len);
+        for (idx, plan) in plans.iter().enumerate() {
+            let block_start = idx * (block_size as usize);
+            let block_len = if idx + 1 == block_count {
+                last_block_len
+            } else {
+                block_size as usize
+            };
+            let block_end = block_start + block_len;
+            let block_transformed = &concat[block_start..block_end];
+            let block_plain = invert_transform_plan(block_transformed, block_len, plan)
+                .expect("invert per block");
+            recovered.extend_from_slice(&block_plain);
+        }
+        assert_eq!(recovered, plain, "multi-block apply/invert roundtrip");
+
+        // Sanity-check that the dictionary serialiser correctly tags this stream as
+        // multi-block in the on-disk topology_count field.
+        let topology = build_topology_for_plan(&plan_a).expect("topology");
+        let placeholder_base = FramedPayloadRun {
+            prefix: Vec::new(),
+            suffix: Vec::new(),
+            frame_tag: *b"FRMB",
+            payload: vec![0u8; 16],
+            base_chunk_len: 8,
+            full_chunk_count: 2,
+            tail_chunk_len: 0,
+            total_chunks: 2,
+        };
+        let stream = RecursiveCircuitStream {
+            base: placeholder_base,
+            transformed_payload: concat.clone(),
+            corrections_payload: Vec::new(),
+            plain_len,
+            transformed_encoded_len: concat.len(),
+            correction_plain_len: 0,
+            correction_encoded_len: 0,
+            transformed_codec: PayloadCodec::Raw,
+            correction_codec: PayloadCodec::Raw,
+            zlib_header: [0u8; 2],
+            zlib_adler32: [0u8; 4],
+            transform_plan: plan_a,
+            topology,
+            multi_block: Some(MultiBlockPlan {
+                block_size,
+                plans: plans.to_vec(),
+            }),
+        };
+        let mut dict_bytes = Vec::new();
+        write_recursive_circuit_dictionary(&mut dict_bytes, &stream);
+        // The topology count field lives just before the topology nodes; it's the u16 at
+        // offset (recursive_circuit_dictionary_size minus topology_nodes minus 8 - 8 bytes).
+        // The simplest verification is that the serialised size matches the size formula
+        // and that the size includes the multi-block plan section.
+        assert_eq!(dict_bytes.len(), recursive_circuit_dictionary_size(&stream));
+        assert!(
+            dict_bytes.len()
+                > framed_dictionary_size(&stream.base)
+                    + 51
+                    + stream.topology.len() * TOPOLOGY_NODE_BYTES,
+            "multi-block dictionary must carry extra plan bytes beyond the single-plan footprint"
+        );
+    }
+
+    #[test]
     fn adaptive_pack_evaluates_recursive_circuit_xz_candidate_and_roundtrips() {
         let (input, _filtered_plain) = build_valid_framed_container_with_split_deflate();
 

@@ -1772,6 +1772,110 @@ fn choose_adaptive_transform_plan(
     })
 }
 
+#[derive(Debug, Clone)]
+struct MultiBlockTransformResult {
+    block_size: u32,
+    plans: Vec<CircuitTransformPlan>,
+    codec: PayloadCodec,
+    payload: Vec<u8>,
+    eval_ms: f64,
+}
+
+fn build_multi_block_transform(
+    plain: &[u8],
+    block_count: u32,
+    profile: CompressionProfile,
+) -> ZbitResult<Option<MultiBlockTransformResult>> {
+    // Minimal sanity checks: need at least two blocks of non-trivial size for the split to
+    // make sense. With smaller payloads the per-block plan-evaluation overhead easily
+    // exceeds any gain.
+    if block_count < 2 {
+        return Ok(None);
+    }
+    let min_block_bytes = 64 * 1024usize;
+    let blocks_usize = block_count as usize;
+    if plain.len() < blocks_usize * min_block_bytes {
+        return Ok(None);
+    }
+
+    let eval_start = Instant::now();
+
+    // Equal-size blocks except the last, which absorbs the remainder. This keeps the format
+    // metadata small (just block_size + count) and lets the decoder reconstruct boundaries.
+    let block_size = (plain.len() / blocks_usize) as u32;
+    if block_size == 0 {
+        return Ok(None);
+    }
+    let mut blocks: Vec<&[u8]> = Vec::with_capacity(blocks_usize);
+    for idx in 0..blocks_usize {
+        let start = idx * block_size as usize;
+        let end = if idx + 1 == blocks_usize {
+            plain.len()
+        } else {
+            start + block_size as usize
+        };
+        if start >= plain.len() {
+            return Ok(None);
+        }
+        blocks.push(&plain[start..end]);
+    }
+
+    // Find best plan per block. We call into the existing plan-finder with budget=1 so the
+    // expensive winner refinement runs against a single XZ-9 encode per block instead of the
+    // full matrix; the per-block result.plan is what we need and the per-block codec output
+    // is discarded — we re-encode the concatenated transformed bytes once at the end.
+    let block_plans: Vec<CircuitTransformPlan> = blocks
+        .par_iter()
+        .map(|block| {
+            choose_adaptive_transform_plan(block, profile, 1).map(|result| result.plan)
+        })
+        .collect::<ZbitResult<Vec<_>>>()?;
+
+    // Apply each plan to its block and concatenate.
+    let mut transformed_concat = Vec::with_capacity(plain.len());
+    for (block, plan) in blocks.iter().zip(block_plans.iter()) {
+        let transformed = apply_transform_plan(block, plan).ok_or_else(|| {
+            ZbitError::Internal("multi-block transform application failed".to_string())
+        })?;
+        if transformed.len() != block.len() {
+            return Err(ZbitError::Internal(
+                "multi-block transform changed block length".to_string(),
+            ));
+        }
+        transformed_concat.extend_from_slice(&transformed);
+    }
+    if transformed_concat.len() != plain.len() {
+        return Err(ZbitError::Internal(
+            "multi-block concatenated transform length mismatch".to_string(),
+        ));
+    }
+
+    // Encode the concatenated transformed bytes with full codec selection + tuned XZ
+    // refinement. This is a single codec pass (not per-block) so the XZ dictionary can
+    // still find cross-block matches.
+    let (mut codec, mut payload) = choose_best_codec(&transformed_concat, true, false, profile)?;
+    if let Some((tuned_codec, tuned_payload)) = choose_best_tuned_xz_candidate(
+        &transformed_concat,
+        profile,
+        profile.enable_xz_extreme_refinement(),
+    )? {
+        if tuned_payload.len() < payload.len() {
+            codec = tuned_codec;
+            payload = tuned_payload;
+        }
+    }
+
+    let eval_ms = eval_start.elapsed().as_secs_f64() * 1000.0;
+
+    Ok(Some(MultiBlockTransformResult {
+        block_size,
+        plans: block_plans,
+        codec,
+        payload,
+        eval_ms,
+    }))
+}
+
 fn choose_correction_transform_plan(
     corrections: &[u8],
     profile: CompressionProfile,

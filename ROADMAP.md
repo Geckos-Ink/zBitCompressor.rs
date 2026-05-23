@@ -50,58 +50,97 @@ get the predictor while rows with `filter=1..4` are left alone. This would requi
 new format slot for per-row predictor IDs, or a deterministic mapping from filter byte to
 predictor.
 
-### N2. Typed substreams for preflate corrections (medium impact)
+### N2. Typed substreams for preflate corrections (blocked on upstream — no in-tree path)
 
-The corrections payload currently encodes as `raw` at 284 093 bytes — neither XZ nor zstd
-can compress it. That is because the underlying preflate corrections are a packed stream
-of (record-tag, payload) tuples interleaved together. Splitting them into typed substreams
-(record-tag stream, literal-correction stream, length-correction stream, distance-correction
-stream, tree-correction stream, fallback bytes) and coding each with the best codec per
-stream should expose redundancy.
+**Investigated and currently blocked.** The corrections payload returned by
+`preflate_whole_deflate_stream` is not a raw record stream we can structurally split — it
+is `bitcode::encode(&ReconstructionData { parameters, corrections })`, where the inner
+`corrections: Vec<u8>` is already a single **CABAC-encoded arithmetic-coded bitstream**
+produced by `PredictionEncoderCabac` (`preflate-rs/src/cabac_codec.rs` + the `cabac` crate).
+CABAC is context-adaptive arithmetic coding: the per-record correction values are coded
+into one continuous bit stream, byte-aligned at the end. There is no record boundary in
+the byte stream to split on.
 
-Implementation outline:
+Concrete consequences for our pipeline:
 
-1. Parse the corrections blob with `preflate-rs` helpers (or reproduce the splitter logic).
-2. For each substream, run the existing `choose_best_codec_cached`.
-3. Serialize substream count + per-stream `(kind, plain_len, encoded_len, codec)` into the
-   recursive dictionary, then concatenate encoded payloads.
-4. Decoder reverses the split and feeds the recovered correction blob to preflate-rs.
+- The byte-level entropy of the 284 093-byte cat corrections is essentially uniform;
+  applying XZ, XZ-extreme, or zstd to it returns *raw* (no compression). That is the
+  arithmetic-coding floor and is observed empirically. The existing
+  `choose_correction_transform_plan` already runs the full transform + codec sweep on the
+  corrections and consistently picks `Raw + Identity` for cat-like inputs.
+- The `bitcode` outer wrapper around `ReconstructionData` adds only ~25–35 bytes of
+  parameter metadata; even if we split the wrapper from the CABAC body and compressed each
+  separately, the savings would be in the dozens of bytes — far below the implementation
+  cost.
 
-Format impact: new dictionary section (length-prefixed list of typed substreams). Bump
-`.zbpk` minor version if the format is otherwise rigid; otherwise gate on a new flag.
+Paths that *would* improve correction encoding, all requiring upstream changes to
+`preflate-rs` (out of scope here):
 
-Risk: requires understanding preflate-rs internal correction record layout. If preflate-rs
-exposes only an opaque blob, fall back to a structural splitter (scan for record-type bytes
-and split on them).
+1. **Emit one CABAC stream per `CodecCorrection` family** (literal-correction stream,
+   length-correction stream, distance-correction stream, tree-correction stream, etc.).
+   Each per-family stream would have its own context tables, so the model would adapt to
+   its own statistics and the total bits should drop. Implementation cost is real: the
+   encoder/decoder pair needs to keep N parallel `PredictionEncoderCabac` instances,
+   demultiplex per call, and merge / split on the wire. Estimated win: 10–25 % on the
+   corrections payload — i.e. ~28–71 KB off cat.
+2. **Switch the entropy coder** from CABAC (VP8-style) to a modern arithmetic coder with
+   better context modelling for the specific token-correction distribution (rANS, ANS,
+   adaptive Range Coder). Same effort, similar expected savings.
+3. **Reduce the number of corrections** by improving preflate's predictor (better hash
+   algorithm detection, better add-policy estimator). This shrinks the input to CABAC
+   instead of compressing its output. Win is highly file-dependent.
 
-Expected impact on cat: 20–80 KB depending on substream entropy. Generalizes to any
-recursive-circuit-xz input with non-trivial corrections.
+Recommendation: keep N2 in the roadmap as an upstream-coordinated work item. From this
+codebase the entropy floor of CABAC is the binding constraint and no transform / codec
+combination below preflate-rs can move it.
 
-### N3. Per-block (block-local) transform plans inside a single pack (medium impact)
+Mitigation we *do* apply already: `choose_correction_transform_plan` keeps testing
+transforms + codecs on every preflate run, so when preflate-rs starts emitting more
+compressible corrections (different chain length, future encoder change), we will pick
+them up automatically without a format bump.
 
-Today `recursive-circuit-xz` selects one transform plan for the whole inflated payload.
-Image data often has scanline batches with different best transforms (smooth regions vs
-high-frequency regions). Splitting the tail into N equal blocks, picking the best transform
-per block, and storing per-block plan IDs would let each block use the locally best plan.
+### N3. Per-block (block-local) transform plans inside a single pack (implemented; helps heterogeneous, neutral on uniform inputs)
 
-Implementation outline:
+Implemented in `zbit-rs/src/pack/transforms.rs::build_multi_block_transform` and wired
+through `zbit-rs/src/pack/recursive.rs::build_recursive_circuit_stream`. The on-disk format
+extension uses the top bit of the existing topology-count `u16` as a `MULTI_BLOCK_FLAG`;
+when set, the recursive dictionary trailer carries `block_count u32`, `block_size u32`,
+then `block_count` × `(kind u8, period u32, head u32)` plans. Legacy single-plan
+dictionaries decode unchanged (the flag bit is never set there).
 
-1. Split tail into N blocks (start with N = 4 or 8).
-2. Run `choose_adaptive_transform_plan` on each block independently (with the cheap XZ-3
-   ranking already in place).
-3. Concatenate transformed blocks; encode as one XZ stream (so dictionary matches still
-   cross block boundaries).
-4. Dictionary stores `block_count`, then per-block `(transform_kind, period, head)`.
-5. Decoder iterates blocks, inverting per-block transforms.
+How it runs:
 
-Format impact: new dictionary section. Bump `.zbpk` minor version.
+1. After the existing single-plan template is built, for each block-count `N` allowed by
+   the profile (deep: 2/4, research: 2/4/8) we split the inflated plain into `N`
+   equal-ish consecutive blocks (last block absorbs the remainder).
+2. Per block we call `choose_adaptive_transform_plan(block, profile, 1)` to find the
+   block-local best plan. The full-eval budget is intentionally tight (1) so the per-block
+   plan-finding does not multiply the worst-case eval time.
+3. The block-local plans are applied to their blocks, the transformed bytes are
+   concatenated, and the **single** concatenated payload goes through
+   `choose_best_codec` + `choose_best_tuned_xz_candidate`. This keeps XZ matches able to
+   cross block boundaries.
+4. We compute `multi_block_total = payload + 8 + N × 9` (block metadata cost) and compare
+   to the single-plan template size; the smaller wins. The single-plan path is never
+   regressed because multi-block is only selected on strict improvement.
 
-Risk: per-block transforms can hurt XZ matches across blocks; the per-block transform must
-either be very local (no shift) or all blocks must agree. Start with same-period transforms
-across blocks (only vary kind), then loosen.
+**Empirical outcome on the existing corpus:**
 
-Expected impact on cat: 30–80 KB; larger on heterogeneous images. Cost: ~Nx the transform
-eval time, but the cheap XZ-3 ranking keeps total under control.
+- Cat (deep profile): single-plan template = `2 386 140 B`; multi-block split=2 =
+  `2 491 916 B` (plans = `gather, head-tail`); split=4 = `2 495 460 B`. Single-plan wins
+  by ~100 KB because cat is uniformly-structured PNG IDAT and re-arranging different
+  halves with different plans destroys XZ's cross-region matches.
+- Paper / primary.3b: not framed-deflate so N3 is not invoked.
+
+Why this is still worth keeping: the format extension is now ready to *win* whenever the
+input has a real per-region split — e.g. a deflate stream that bundles markup + binary
+attachments, or a multi-image archive whose IDAT streams differ in stride. On those
+inputs the per-block plan-finding will produce different winners and the multi-block path
+will beat the single-plan path on size.
+
+Cost profile on cat (deep): adds ~30–60 s to a full deep encode (per-block plan finding
++ a couple extra full-data XZ-9 encodes). Off entirely for fast/balanced via the
+`CompressionProfile::multi_block_split_counts()` gate.
 
 ### N4. LZMA delta filter via xz2 / direct lzma-sys (medium impact)
 

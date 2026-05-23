@@ -351,8 +351,99 @@ fn build_recursive_circuit_stream(
     context.timings.recursive_transform_sampling_ms += transformed_template.sampling_ms;
     context.timings.recursive_transform_eval_ms += transformed_template.eval_ms;
 
-    let correction_timer = Instant::now();
+    // N3 multi-block path: probe a small set of block-count candidates allowed by the active
+    // profile. Each candidate splits the inflated plain into N equal-ish blocks, picks the
+    // best transform plan per block, concatenates the transformed bytes, and re-encodes with
+    // the full codec selection. We keep the candidate with the smallest *codec payload +
+    // multi-block metadata*; if no candidate beats the single-plan template, we discard them
+    // all and stay on the legacy single-plan path.
+    let multi_block_candidate: Option<MultiBlockTransformResult> = {
+        let splits = context.profile.multi_block_split_counts();
+        if splits.is_empty() {
+            None
+        } else {
+            let trace_recursive = std::env::var_os("ZBIT_TRACE_RECURSIVE").is_some();
+            let plain_slice: &[u8] = &preflate_results[0].2;
+            let profile = context.profile;
+            let mut results: Vec<MultiBlockTransformResult> = splits
+                .iter()
+                .copied()
+                .filter_map(|n| build_multi_block_transform(plain_slice, n, profile).ok().flatten())
+                .collect();
+            if trace_recursive {
+                for result in &results {
+                    eprintln!(
+                        "zbit-trace recursive multi-block split={} block_size={} payload={} plans={:?}",
+                        result.plans.len(),
+                        result.block_size,
+                        result.payload.len(),
+                        result
+                            .plans
+                            .iter()
+                            .map(|p| (p.kind.name(), p.period, p.head))
+                            .collect::<Vec<_>>(),
+                    );
+                }
+            }
+            // Sort by total candidate cost (payload bytes + per-plan metadata) and keep best.
+            results.sort_by_key(|result| {
+                result.payload.len()
+                    + 4
+                    + 4
+                    + result.plans.len() * RECURSIVE_BLOCK_PLAN_BYTES
+            });
+            results.into_iter().next()
+        }
+    };
+    if let Some(ref mb) = multi_block_candidate {
+        context.timings.recursive_transform_eval_ms += mb.eval_ms;
+    }
+
+    // Pick the best primary template (single-plan vs multi-block) by total payload + metadata
+    // cost. Both forms share the same per-chain correction modelling stage below.
+    let single_template_total =
+        transformed_template.payload.len();
+    let multi_block_winner = multi_block_candidate.as_ref().and_then(|mb| {
+        let mb_total =
+            mb.payload.len() + 4 + 4 + mb.plans.len() * RECURSIVE_BLOCK_PLAN_BYTES;
+        if mb_total < single_template_total {
+            Some(mb)
+        } else {
+            None
+        }
+    });
     let trace_recursive = std::env::var_os("ZBIT_TRACE_RECURSIVE").is_some();
+    if trace_recursive {
+        eprintln!(
+            "zbit-trace recursive template-pick single={} multi-block={:?} winner={}",
+            single_template_total,
+            multi_block_candidate.as_ref().map(|mb| mb.payload.len()
+                + 4
+                + 4
+                + mb.plans.len() * RECURSIVE_BLOCK_PLAN_BYTES),
+            if multi_block_winner.is_some() {
+                "multi-block"
+            } else {
+                "single-plan"
+            }
+        );
+    }
+    let template_payload = if let Some(mb) = multi_block_winner {
+        mb.payload.clone()
+    } else {
+        transformed_template.payload.clone()
+    };
+    let template_codec = if let Some(mb) = multi_block_winner {
+        mb.codec
+    } else {
+        transformed_template.codec
+    };
+    let template_multi_block = multi_block_winner.map(|mb| MultiBlockPlan {
+        block_size: mb.block_size,
+        plans: mb.plans.clone(),
+    });
+
+    let correction_timer = Instant::now();
     let profile = context.profile;
     let evaluated = preflate_results
         .into_par_iter()
@@ -370,18 +461,19 @@ fn build_recursive_circuit_stream(
 
             let stream = RecursiveCircuitStream {
                 base: base.clone(),
-                transformed_payload: transformed_template.payload.clone(),
+                transformed_payload: template_payload.clone(),
                 corrections_payload,
                 plain_len,
-                transformed_encoded_len: transformed_template.payload.len(),
+                transformed_encoded_len: template_payload.len(),
                 correction_plain_len: corrections.len(),
                 correction_encoded_len: 0,
-                transformed_codec: transformed_template.codec,
+                transformed_codec: template_codec,
                 correction_codec,
                 zlib_header,
                 zlib_adler32,
                 transform_plan: transformed_template.plan,
                 topology,
+                multi_block: template_multi_block.clone(),
             };
             let correction_encoded_len = stream.corrections_payload.len();
             let mut stream = stream;
@@ -446,8 +538,22 @@ fn build_recursive_circuit_stream(
     Ok(Some(stream))
 }
 
+// Top bit of the on-disk topology count signals the N3 multi-block extension.
+// When set, an additional `block_count u32`, `block_size u32`, then `block_count` plans of
+// the form (kind u8, period u32, head u32) follow the topology nodes. Legacy single-plan
+// dictionaries set neither this bit nor the trailing section, and decode unchanged.
+const RECURSIVE_TOPOLOGY_MULTI_BLOCK_FLAG: u16 = 0x8000;
+const RECURSIVE_TOPOLOGY_COUNT_MASK: u16 = 0x7FFF;
+const RECURSIVE_BLOCK_PLAN_BYTES: usize = 1 + 4 + 4;
+
 fn recursive_circuit_dictionary_size(stream: &RecursiveCircuitStream) -> usize {
-    framed_dictionary_size(&stream.base) + 51 + stream.topology.len() * TOPOLOGY_NODE_BYTES
+    let mut size =
+        framed_dictionary_size(&stream.base) + 51 + stream.topology.len() * TOPOLOGY_NODE_BYTES;
+    if let Some(mb) = &stream.multi_block {
+        // block_count u32 + block_size u32 + per-plan (kind u8 + period u32 + head u32)
+        size += 4 + 4 + mb.plans.len() * RECURSIVE_BLOCK_PLAN_BYTES;
+    }
+    size
 }
 
 fn write_recursive_circuit_dictionary(out: &mut Vec<u8>, stream: &RecursiveCircuitStream) {
@@ -463,7 +569,11 @@ fn write_recursive_circuit_dictionary(out: &mut Vec<u8>, stream: &RecursiveCircu
     out.push(stream.transform_plan.kind.as_u8());
     push_u32(out, stream.transform_plan.period);
     push_u32(out, stream.transform_plan.head);
-    push_u16(out, stream.topology.len() as u16);
+    let mut topology_field = (stream.topology.len() as u16) & RECURSIVE_TOPOLOGY_COUNT_MASK;
+    if stream.multi_block.is_some() {
+        topology_field |= RECURSIVE_TOPOLOGY_MULTI_BLOCK_FLAG;
+    }
+    push_u16(out, topology_field);
     for node in &stream.topology {
         push_u32(out, node.id);
         push_u32(out, node.parent_id);
@@ -473,6 +583,15 @@ fn write_recursive_circuit_dictionary(out: &mut Vec<u8>, stream: &RecursiveCircu
         push_u32(out, node.param_a);
         push_u32(out, node.param_b);
         push_u64(out, node.hash64);
+    }
+    if let Some(mb) = &stream.multi_block {
+        push_u32(out, mb.plans.len() as u32);
+        push_u32(out, mb.block_size);
+        for plan in &mb.plans {
+            out.push(plan.kind.as_u8());
+            push_u32(out, plan.period);
+            push_u32(out, plan.head);
+        }
     }
 }
 
@@ -544,7 +663,9 @@ fn decode_recursive_circuit_payload(
     })?;
     let transform_period = read_u32(dict_bytes, &mut dict_cursor)?;
     let transform_head = read_u32(dict_bytes, &mut dict_cursor)?;
-    let topology_count = read_u16(dict_bytes, &mut dict_cursor)? as usize;
+    let topology_raw = read_u16(dict_bytes, &mut dict_cursor)?;
+    let multi_block_present = (topology_raw & RECURSIVE_TOPOLOGY_MULTI_BLOCK_FLAG) != 0;
+    let topology_count = (topology_raw & RECURSIVE_TOPOLOGY_COUNT_MASK) as usize;
     let mut correction_plan = CircuitTransformPlan {
         kind: CircuitTransformKind::Identity,
         period: 0,
@@ -607,6 +728,35 @@ fn decode_recursive_circuit_payload(
         last_id = id;
     }
 
+    let mut block_plans: Vec<CircuitTransformPlan> = Vec::new();
+    let mut block_size_field = 0u32;
+    if multi_block_present {
+        let block_count = read_u32(dict_bytes, &mut dict_cursor)? as usize;
+        block_size_field = read_u32(dict_bytes, &mut dict_cursor)?;
+        if block_count == 0 {
+            return Err(ZbitError::Parse(
+                "recursive-circuit-xz multi-block extension claims zero blocks".to_string(),
+            ));
+        }
+        if block_size_field == 0 {
+            return Err(ZbitError::Parse(
+                "recursive-circuit-xz multi-block extension has zero block size".to_string(),
+            ));
+        }
+        block_plans.reserve(block_count);
+        for _ in 0..block_count {
+            let kind_u8 = read_u8(dict_bytes, &mut dict_cursor)?;
+            let kind = CircuitTransformKind::from_u8(kind_u8).ok_or_else(|| {
+                ZbitError::Parse(
+                    "recursive-circuit-xz multi-block plan has invalid transform kind".to_string(),
+                )
+            })?;
+            let period = read_u32(dict_bytes, &mut dict_cursor)?;
+            let head = read_u32(dict_bytes, &mut dict_cursor)?;
+            block_plans.push(CircuitTransformPlan { kind, period, head });
+        }
+    }
+
     if dict_cursor != dict_bytes.len() {
         return Err(ZbitError::Parse(
             "trailing bytes in recursive-circuit-xz dictionary".to_string(),
@@ -648,10 +798,64 @@ fn decode_recursive_circuit_payload(
         period: transform_period,
         head: transform_head,
     };
-    let filtered_plain =
+    let filtered_plain = if block_plans.is_empty() {
         invert_transform_plan(&transformed, plain_len, &plan).ok_or_else(|| {
             ZbitError::Parse("recursive-circuit-xz transformed stream is invalid".to_string())
-        })?;
+        })?
+    } else {
+        // Multi-block extension: split transformed bytes into block_count consecutive blocks
+        // (every non-last block is exactly block_size_field bytes; the last block carries the
+        // remainder). Invert each block with its own plan and concatenate.
+        let block_size = block_size_field as usize;
+        let block_count = block_plans.len();
+        let leading_bytes = block_size
+            .checked_mul(block_count.saturating_sub(1))
+            .ok_or_else(|| {
+                ZbitError::Parse(
+                    "recursive-circuit-xz multi-block size overflow".to_string(),
+                )
+            })?;
+        if leading_bytes > plain_len {
+            return Err(ZbitError::Parse(
+                "recursive-circuit-xz multi-block leading bytes exceed plain_len".to_string(),
+            ));
+        }
+        let last_block_len = plain_len - leading_bytes;
+        if transformed.len() != plain_len {
+            return Err(ZbitError::Parse(
+                "recursive-circuit-xz multi-block transformed length mismatch".to_string(),
+            ));
+        }
+        let mut out = Vec::with_capacity(plain_len);
+        for (idx, plan) in block_plans.iter().enumerate() {
+            let block_start = idx * block_size;
+            let block_len = if idx + 1 == block_count {
+                last_block_len
+            } else {
+                block_size
+            };
+            let block_end = block_start + block_len;
+            let block_transformed = transformed
+                .get(block_start..block_end)
+                .ok_or_else(|| {
+                    ZbitError::Parse(
+                        "recursive-circuit-xz multi-block range out of bounds".to_string(),
+                    )
+                })?;
+            let block_plain = invert_transform_plan(block_transformed, block_len, plan)
+                .ok_or_else(|| {
+                    ZbitError::Parse(
+                        "recursive-circuit-xz multi-block stream is invalid".to_string(),
+                    )
+                })?;
+            out.extend_from_slice(&block_plain);
+        }
+        // The single-plan transform_plan field is still embedded but unused in multi-block mode
+        // (we keep it filled with the first block's plan for telemetry). Silence the unused
+        // binding below.
+        let _ = plan;
+        out
+    };
 
     let deflate_stream = recreate_whole_deflate_stream(&filtered_plain, &corrections)
         .map_err(|e| ZbitError::Parse(format!("preflate recreate failed: {e}")))?;

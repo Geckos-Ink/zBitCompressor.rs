@@ -1,5 +1,5 @@
 zBit-rs Real File Benchmark Report
-Generated: 2026-05-23 07:24:40
+Generated: 2026-05-23 07:59:09
 Input file: assets/primary.3b.bin
 Compressed artifact: /tmp/p3b.zbpk
 
@@ -28,18 +28,18 @@ Compressed size (bytes): 562836
 Compression ratio (compressed/original): 0.174058
 Space savings (%): 82.59
 
-Compression time (ms): 4974.434
-Decompression time (ms): 31.354
-Compression throughput (MiB/s): 0.620
-Decompression throughput (MiB/s): 98.355
+Compression time (ms): 4779.996
+Decompression time (ms): 32.056
+Compression throughput (MiB/s): 0.645
+Decompression throughput (MiB/s): 96.200
 
 Candidate timing breakdown (ms):
-- index stream build: 70.138
-- huffman stream build: 79.576
-- raw-deflate encode: 79.007
-- raw-zstd encode: 291.052
-- raw-xz encode: 1121.953
-- framed extraction: 364.921
+- index stream build: 68.407
+- huffman stream build: 78.397
+- raw-deflate encode: 78.865
+- raw-zstd encode: 292.613
+- raw-xz encode: 1104.747
+- framed extraction: 361.507
 - recursive preflate search: 0.000
 - recursive transform sampling: 0.000
 - recursive transform evaluation: 0.000
