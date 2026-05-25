@@ -66,14 +66,14 @@ A Karnaugh map assigns each combination of $n$ binary input variables to one cel
 
 zBitCompressor generalizes this idea beyond the small visual grid:
 
-| K-map concept | zBit generalization |
-| --- | --- |
-| Cell | A byte, a bit, a symbol, a chunk, a transformed position, or a truth-table row |
-| ON-set minterm | A position/assignment where a modeled output bit is `1` |
-| OFF-set | A position/assignment where the output must be `0` |
-| Don't-care | A position whose value can be chosen freely or corrected separately |
-| Cube / implicant | A rectangular region over many dimensions |
-| Circuit | A compact executable description of one or more such regions |
+| K-map concept    | zBit generalization                                                            |
+| ---------------- | ------------------------------------------------------------------------------ |
+| Cell             | A byte, a bit, a symbol, a chunk, a transformed position, or a truth-table row |
+| ON-set minterm   | A position/assignment where a modeled output bit is `1`                        |
+| OFF-set          | A position/assignment where the output must be `0`                             |
+| Don't-care       | A position whose value can be chosen freely or corrected separately            |
+| Cube / implicant | A rectangular region over many dimensions                                      |
+| Circuit          | A compact executable description of one or more such regions                   |
 
 The key compression criterion is:
 
@@ -96,7 +96,6 @@ graph LR
     C --> D["Select essential implicants"]
     D --> E["Branch-and-bound exact cover\n(minimize terms, then literals)"]
     E --> F["Minimum cover"]
-
 ```
 
 *Figure 1. Exact two-level minimization flow.*
@@ -146,7 +145,6 @@ flowchart TD
     F --> G{Score improved?}
     G -->|Yes| B
     G -->|No| H["Output best cover"]
-
 ```
 
 *Figure 2. Espresso-style heuristic cover-refinement loop.*
@@ -163,13 +161,13 @@ The SAT oracle is invoked only for inputs at or below a configurable limit (defa
 
 The compressor supports multiple optimization targets beyond raw literal count:
 
-| Objective | Primary cost metric |
-| --- | --- |
+| Objective      | Primary cost metric             |
+| -------------- | ------------------------------- |
 | `LiteralCount` | Total literals across all cubes |
-| `AsicArea` | Proxy: AND2 gates + inversions |
-| `AsicDelay` | Proxy: critical path depth |
-| `FpgaLut4` | Estimated 4-input LUT count |
-| `FpgaLut6` | Estimated 6-input LUT count |
+| `AsicArea`     | Proxy: AND2 gates + inversions  |
+| `AsicDelay`    | Proxy: critical path depth      |
+| `FpgaLut4`     | Estimated 4-input LUT count     |
+| `FpgaLut6`     | Estimated 6-input LUT count     |
 
 The final cover minimizing the selected objective is reported alongside the associated implicant count, literal count, estimated gate count, depth, and LUT count.
 
@@ -195,7 +193,6 @@ flowchart TD
     C & D & E & F & G & H & I & J --> K["Compare full serialized sizes"]
     K --> L["Select smallest validated candidate"]
     L --> M["Write .zbpk artifact"]
-
 ```
 
 *Figure 3. Adaptive multi-candidate packing architecture.*
@@ -218,16 +215,16 @@ The selection rule has one invariant: **the output is never larger than the raw 
 
 The container format encodes only the bits each field actually requires. Header fields use varint encoding; enumeration values occupy only $\lceil\log_2(\text{distinct values})\rceil$ bits; topology nodes are packed into a single MSB-first bit stream where each field contributes the minimum necessary bits:
 
-| Field | Encoding |
-| --- | --- |
-| `method` (≤ 16 values) | 4 bits |
-| `bits_per_symbol` (0..15) | 4 bits (packed with method) |
-| `original_size`, `dict_size`, `payload_size` | varint |
-| Transform kind index (49 in-use values) | 6 bits |
-| Topology `relation` | 1 bit |
-| Topology `order` (0..3) | 2 bits |
-| Topology `parent_index` | $\lceil\log_2(N_\text{prev})\rceil$ bits |
-| `period`, `head`, `param_a`, `param_b` | nibble-varint (4 bits/nibble) |
+| Field                                        | Encoding                                 |
+| -------------------------------------------- | ---------------------------------------- |
+| `method` (≤ 16 values)                       | 4 bits                                   |
+| `bits_per_symbol` (0..15)                    | 4 bits (packed with method)              |
+| `original_size`, `dict_size`, `payload_size` | varint                                   |
+| Transform kind index (49 in-use values)      | 6 bits                                   |
+| Topology `relation`                          | 1 bit                                    |
+| Topology `order` (0..3)                      | 2 bits                                   |
+| Topology `parent_index`                      | $\lceil\log_2(N_\text{prev})\rceil$ bits |
+| `period`, `head`, `param_a`, `param_b`       | nibble-varint (4 bits/nibble)            |
 
 The result: a trivial single-node topology consumes 18 bits on the wire (previously 224 bits in a fixed-layout scheme), and the entire format dictionary for a 2.97 MB PNG compressed file occupies roughly 110 bytes out of a 2.67 MB output—about 0.004% of the total.
 
@@ -245,19 +242,19 @@ The recursive-circuit-xz and adaptive-transformed-xz paths exist to discover and
 
 The system maintains a library of reversible single-pass transforms:
 
-| Family | Description |
-| --- | --- |
-| **Identity** | No transformation |
-| **Prev-delta** | Each byte becomes the difference from the previous byte |
-| **Prev-XOR** | Each byte XOR-ed with the previous byte |
-| **Bit-plane transpose** | Rearrange bytes so all bits of rank $k$ across a window are contiguous |
-| **Bit-plane + delta** | Bit-plane transpose followed by prev-delta |
-| **Bit-plane + XOR** | Bit-plane transpose followed by prev-XOR |
-| **Periodic head/tail split** | Given a period $p$ and head count $h$, separate the first $h$ bytes of each period (the "header" bytes) from the remaining $p - h$ bytes (the "payload" bytes) |
-| **Periodic gather** | Collect all bytes at stride offset $k$ within each period of length $p$ into a contiguous block |
-| **Periodic delta / XOR** | Apply delta or XOR within each stride lane |
-| **Tail row-delta / row-XOR / row-up** | Per-scanline predictors (Sub / XOR / Up) applied to the tail portion after head/tail split |
-| **Tail bit-plane** | Bit-plane transpose applied only to the tail portion |
+| Family                                | Description                                                                                                                                                    |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Identity**                          | No transformation                                                                                                                                              |
+| **Prev-delta**                        | Each byte becomes the difference from the previous byte                                                                                                        |
+| **Prev-XOR**                          | Each byte XOR-ed with the previous byte                                                                                                                        |
+| **Bit-plane transpose**               | Rearrange bytes so all bits of rank $k$ across a window are contiguous                                                                                         |
+| **Bit-plane + delta**                 | Bit-plane transpose followed by prev-delta                                                                                                                     |
+| **Bit-plane + XOR**                   | Bit-plane transpose followed by prev-XOR                                                                                                                       |
+| **Periodic head/tail split**          | Given a period $p$ and head count $h$, separate the first $h$ bytes of each period (the "header" bytes) from the remaining $p - h$ bytes (the "payload" bytes) |
+| **Periodic gather**                   | Collect all bytes at stride offset $k$ within each period of length $p$ into a contiguous block                                                                |
+| **Periodic delta / XOR**              | Apply delta or XOR within each stride lane                                                                                                                     |
+| **Tail row-delta / row-XOR / row-up** | Per-scanline predictors (Sub / XOR / Up) applied to the tail portion after head/tail split                                                                     |
+| **Tail bit-plane**                    | Bit-plane transpose applied only to the tail portion                                                                                                           |
 
 Each transform has an exact inverse, so no information is lost. Transforms are composable through a topology DAG of up to five nodes.
 
@@ -273,7 +270,6 @@ flowchart TD
     F --> G["choose_best_codec\n(XZ tuning matrix, zstd, deflate)"]
     G --> H["Write: transform_kind + period + head + codec\n+ plain_len (compact dict)"]
     H --> I["Decoder: read dict → invert transform\n→ decompress"]
-
 ```
 
 *Figure 4. Adaptive transform-plan selection and serialization.*
@@ -295,7 +291,6 @@ flowchart LR
     F & G --> H["Build circuit topology DAG\n(transform + correction plans)"]
     H --> I["Write dictionary + payload\n+ correction stream"]
     I --> J["Decoder: parse topology →\ninvert transform → apply corrections\n→ reconstruct exact frames"]
-
 ```
 
 *Figure 5. Deflate-aware recursive-circuit-xz path.*
@@ -318,11 +313,11 @@ The streaming mode (`.zbps` format) handles large inputs by splitting them into 
 
 Each block is represented as a tree of *stream nodes*:
 
-| Node kind | Semantics |
-| --- | --- |
-| **Piece** | One chunk compressed independently |
-| **Group** | Several adjacent chunks compressed jointly as a single range |
-| **Split** | Binary combination of two child nodes |
+| Node kind       | Semantics                                                        |
+| --------------- | ---------------------------------------------------------------- |
+| **Piece**       | One chunk compressed independently                               |
+| **Group**       | Several adjacent chunks compressed jointly as a single range     |
+| **Split**       | Binary combination of two child nodes                            |
 | **GlobalSlice** | A byte range extracted from a shared globally-compressed payload |
 
 ```mermaid
@@ -334,7 +329,6 @@ flowchart TD
     E --> F["DP: choose minimum total\nencoded size"]
     F --> G["Write .zbps blocks\nat key-piece boundaries"]
     G --> H["Decoder: parse block tree\n→ decode each node\n→ concatenate"]
-
 ```
 
 *Figure 6. Stream compression planning.*
@@ -351,12 +345,12 @@ Memoization prevents redundant evaluation. The planner selects the combination m
 
 ### 7.4 Streaming Profiles
 
-| Profile | Savings | Throughput | Use case |
-| --- | --- | --- | --- |
-| `realtime-fast` | ~0.10% | 471 MiB/s decompress | Live transcoding, zero-latency |
-| `realtime-balanced` | ~0.14% | 414 MiB/s decompress | Balanced real-time |
-| `realtime-deep` | ~10.05% | 0.34 MiB/s decompress | Offline, ratio-first |
-| `wide-overfit` | ~10.05% | 0.28 MiB/s decompress | Maximum ratio with global payload |
+| Profile             | Savings | Throughput            | Use case                          |
+| ------------------- | ------- | --------------------- | --------------------------------- |
+| `realtime-fast`     | ~0.10%  | 471 MiB/s decompress  | Live transcoding, zero-latency    |
+| `realtime-balanced` | ~0.14%  | 414 MiB/s decompress  | Balanced real-time                |
+| `realtime-deep`     | ~10.05% | 0.34 MiB/s decompress | Offline, ratio-first              |
+| `wide-overfit`      | ~10.05% | 0.28 MiB/s decompress | Maximum ratio with global payload |
 
 The realtime-fast and realtime-balanced profiles process one chunk at a time with no cross-chunk grouping, enabling near-instantaneous decoding. The deep and wide-overfit profiles allow extensive cross-chunk grouping and global payload construction, achieving ratio comparable to the non-streaming mode at the cost of compression throughput.
 
@@ -368,23 +362,23 @@ The realtime-fast and realtime-balanced profiles process one chunk at a time wit
 
 Four corpora covering qualitatively different data types were used:
 
-| Corpus | File type | Size (bytes) | Description |
-| --- | --- | --- | --- |
-| `paper` | Markdown text | 62,015 | Academic survey document |
-| `primary.3b` | Structured binary | 3,233,613 | Monotonic fixed-width integer stream |
-| `cat` | PNG image | 2,969,404 | Compressed photographic image |
-| `depth_anything` | PyTorch model | 99,218,434 | ViT-S neural network weights |
+| Corpus           | File type         | Size (bytes) | Description                          |
+| ---------------- | ----------------- | ------------ | ------------------------------------ |
+| `paper`          | Markdown text     | 62,015       | Academic survey document             |
+| `primary.3b`     | Structured binary | 3,233,613    | Monotonic fixed-width integer stream |
+| `cat`            | PNG image         | 2,969,404    | Compressed photographic image        |
+| `depth_anything` | PyTorch model     | 99,218,434   | ViT-S neural network weights         |
 
 All experiments were run on the `balanced` compression profile. Validation (`PASS`/`FAIL`) confirms exact roundtrip byte equality.
 
 ### 8.2 Single-Run Benchmark Results
 
-| Corpus | Original (B) | Compressed (B) | Ratio | Savings | Selected method | Compress (ms) | Decompress (ms) |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `paper` | 62,015 | 20,561 | 0.3315 | 66.85% | `raw-xz` | 76 | 3 |
-| `primary.3b` | 3,233,613 | 562,799 | 0.1740 | 82.60% | `monotonic-delta` | 5,815 | 35 |
-| `cat` | 2,969,404 | 2,670,571 | 0.8994 | 10.06% | `recursive-circuit-xz` | 64,968 | 549 |
-| `depth_anything` | 99,218,434 | 83,380,762 | 0.8404 | 15.96% | `adaptive-transformed-xz` | 628,278 | 178 |
+| Corpus           | Original (B) | Compressed (B) | Ratio  | Savings | Selected method           | Compress (ms) | Decompress (ms) |
+| ---------------- | ------------ | -------------- | ------ | ------- | ------------------------- | ------------- | --------------- |
+| `paper`          | 62,015       | 20,561         | 0.3315 | 66.85%  | `raw-xz`                  | 76            | 3               |
+| `primary.3b`     | 3,233,613    | 562,799        | 0.1740 | 82.60%  | `monotonic-delta`         | 5,815         | 35              |
+| `cat`            | 2,969,404    | 2,670,571      | 0.8994 | 10.06%  | `recursive-circuit-xz`    | 64,968        | 549             |
+| `depth_anything` | 99,218,434   | 83,380,762     | 0.8404 | 15.96%  | `adaptive-transformed-xz` | 628,278       | 178             |
 
 All outputs: **Validation PASS**.
 
@@ -392,15 +386,15 @@ All outputs: **Validation PASS**.
 
 The tensor benchmark (`depth_anything_v2_vits.pth`, 99.2 MB) is the most instructive case because classical codecs offer limited gain:
 
-| Candidate method | Output size (bytes) | Savings vs. raw |
-| --- | --- | --- |
-| raw-copy | 99,218,434 | 0.00% |
-| indexed-raw | 99,218,719 | −0.00% (larger) |
-| indexed-huffman | 92,218,133 | 7.05% |
-| raw-deflate | 92,076,337 | 7.20% |
-| raw-zstd | 91,967,666 | 7.31% |
-| raw-xz | 92,125,733 | 7.15% |
-| **adaptive-transformed-xz** | **83,380,762** | **15.96%** |
+| Candidate method            | Output size (bytes) | Savings vs. raw |
+| --------------------------- | ------------------- | --------------- |
+| raw-copy                    | 99,218,434          | 0.00%           |
+| indexed-raw                 | 99,218,719          | −0.00% (larger) |
+| indexed-huffman             | 92,218,133          | 7.05%           |
+| raw-deflate                 | 92,076,337          | 7.20%           |
+| raw-zstd                    | 91,967,666          | 7.31%           |
+| raw-xz                      | 92,125,733          | 7.15%           |
+| **adaptive-transformed-xz** | **83,380,762**      | **15.96%**      |
 
 The adaptive-transformed-xz path saves an additional **~8.7 MB** over the best classical codec. This improvement comes from the reversible-transform plan search discovering that the tensor payload has a strong periodic structure at the float32 element stride (4 bytes), where separating the bytes of each element into stride lanes (periodic gather) and then applying XZ to each lane separately yields dramatically better compression than feeding the raw byte stream to XZ.
 
@@ -410,13 +404,13 @@ The win is impossible for a classical LZ/arithmetic coder to achieve without ext
 
 For the PNG corpus (`cat_challenge.png`, 2.97 MB), the recursive-circuit-xz path wins by approximately 10% over all classical codecs:
 
-| Candidate method | Output size (bytes) |
-| --- | --- |
-| raw-copy | 2,969,433 |
-| framed-raw | 2,965,104 |
-| raw-zstd | 2,969,508 |
-| raw-xz | 2,969,633 |
-| **recursive-circuit-xz** | **2,670,576** |
+| Candidate method         | Output size (bytes) |
+| ------------------------ | ------------------- |
+| raw-copy                 | 2,969,433           |
+| framed-raw               | 2,965,104           |
+| raw-zstd                 | 2,969,508           |
+| raw-xz                   | 2,969,633           |
+| **recursive-circuit-xz** | **2,670,576**       |
 
 The ~299 KB gain comes from the deflate-aware reconstruction path: by inflating the PNG IDAT payload, applying a periodic head/tail transform (separating filter bytes from row data), re-compressing with XZ-9 at the optimal tuning, and encoding only a small correction stream for the DEFLATE encoder decisions, the format achieves what direct re-compression of the PNG file cannot.
 
@@ -424,23 +418,23 @@ The ~299 KB gain comes from the deflate-aware reconstruction path: by inflating 
 
 The ZBPK v3 bit-packed format reduces dictionary overhead to negligible levels:
 
-| Corpus | Compressed file | Dictionary footprint | Dict / total |
-| --- | --- | --- | --- |
-| `paper` | 20,561 B | ~17 B | 0.083% |
-| `primary.3b` | 562,799 B | ~29 B | 0.005% |
-| `cat` | 2,670,571 B | ~55 B | 0.002% |
-| `depth_anything` | 83,380,762 B | ~27 B | 0.000% |
+| Corpus           | Compressed file | Dictionary footprint | Dict / total |
+| ---------------- | --------------- | -------------------- | ------------ |
+| `paper`          | 20,561 B        | ~17 B                | 0.083%       |
+| `primary.3b`     | 562,799 B       | ~29 B                | 0.005%       |
+| `cat`            | 2,670,571 B     | ~55 B                | 0.002%       |
+| `depth_anything` | 83,380,762 B    | ~27 B                | 0.000%       |
 
 In every case, >99.99% of the compressed file is payload; format overhead is negligible. This confirms that further format-level compaction cannot improve ratio meaningfully; only payload improvements (better transforms, cross-region circuit reuse) can.
 
 ### 8.6 Streaming Results on the Cat Corpus
 
-| Profile | Savings | Compress (ms) | Decompress (ms) | Decomp. throughput |
-| --- | --- | --- | --- | --- |
-| `realtime-fast` | 0.10% | 1,022 | 6 | 471 MiB/s |
-| `realtime-balanced` | 0.14% | 3,502 | 7 | 414 MiB/s |
-| `realtime-deep` | 10.05% | 193,723 | 8,252 | 0.34 MiB/s |
-| `wide-overfit` | 10.05% | 302,112 | 10,153 | 0.28 MiB/s |
+| Profile             | Savings | Compress (ms) | Decompress (ms) | Decomp. throughput |
+| ------------------- | ------- | ------------- | --------------- | ------------------ |
+| `realtime-fast`     | 0.10%   | 1,022         | 6               | 471 MiB/s          |
+| `realtime-balanced` | 0.14%   | 3,502         | 7               | 414 MiB/s          |
+| `realtime-deep`     | 10.05%  | 193,723       | 8,252           | 0.34 MiB/s         |
+| `wide-overfit`      | 10.05%  | 302,112       | 10,153          | 0.28 MiB/s         |
 
 Real-time profiles process independently, enabling live streaming with no round-trip latency penalty. Deep profiles apply the full transform-plan search across grouped chunks, recovering the same ratio as the non-streaming mode.
 
@@ -448,12 +442,12 @@ Real-time profiles process independently, enabling live streaming with no round-
 
 Architectural refinements reduced compression times substantially between early and current implementations while preserving or improving ratio:
 
-| Corpus | Earlier time (ms) | Current time (ms) | Speedup |
-| --- | --- | --- | --- |
-| `paper` | ~313 | 76 | 4.1× |
-| `primary.3b` | ~16,635 | 5,815 | 2.9× |
-| `cat` | ~112,500 | 64,968 | 1.7× |
-| `depth_anything` | ~5,429,743 | 628,278 | 8.6× |
+| Corpus           | Earlier time (ms) | Current time (ms) | Speedup |
+| ---------------- | ----------------- | ----------------- | ------- |
+| `paper`          | ~313              | 76                | 4.1×    |
+| `primary.3b`     | ~16,635           | 5,815             | 2.9×    |
+| `cat`            | ~112,500          | 64,968            | 1.7×    |
+| `depth_anything` | ~5,429,743        | 628,278           | 8.6×    |
 
 The tensor speedup (8.6×) was the largest, driven primarily by: (a) a cheap XZ-3 ranking pass that eliminates most losing transform candidates before the expensive full tuning-matrix evaluation; (b) bounding the CRC32 frame scan false-positive path; and (c) skipping the full raw-xz tuning matrix when adaptive-transformed-xz clearly dominates.
 
