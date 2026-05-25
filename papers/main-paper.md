@@ -1,16 +1,14 @@
-25 May 2026
+25 May 2026 - Version: 1.0
 
 # zBitCompressor: Structural Boolean Compression via Generalized Karnaugh Maps and Adaptive Transform Circuits
 
 **Riccardo Cecchini** (*rcecchini.ds@gmail.com*)
 
-Version: 1.0
-
 ---
 
 ## Abstract
 
-We present **zBitCompressor**, an experimental compression system that treats input data not merely as a linear byte sequence but simultaneously as a high-dimensional Boolean landscape. Inspired by the Karnaugh-map abstraction from digital logic design, the compressor searches for regions of this landscape that can be described more compactly as simplified logic circuits than as raw bytes. The system integrates exact Boolean minimization (Quine-McCluskey style, bounded at 16 inputs), Espresso-inspired iterative heuristic cover refinement, SAT-assisted local pruning, and a canonical circuit DAG with structural sharing. For real-file compression, a multi-candidate adaptive packer evaluates dozens of reversible representations—including raw codecs, symbolic dictionaries, framed-payload models, reversible-transform circuits, and monotonic-stream encoders—and selects the smallest validated candidate. A key finding is that reversible-transform circuits can discover periodic structure inside neural network weight tensors, achieving **15.96% space savings** on a PyTorch model file where classical codecs such as XZ/LZMA2 reach only 7–9%. The architecture also supports a streaming mode with restartable key-piece blocks and multi-level grouping. Exact byte-for-byte roundtrip validation is mandatory for every selected representation. Rust implementation source code is available at [https://github.com/Geckos-Ink/zBitCompressor.rs](https://github.com/Geckos-Ink/zBitCompressor.rs).
+I present **zBitCompressor**, an experimental compression system that treats input data not merely as a linear byte sequence but simultaneously as a high-dimensional Boolean landscape. Inspired by the Karnaugh-map abstraction from digital logic design, the compressor searches for regions of this landscape that can be described more compactly as simplified logic circuits than as raw bytes. The system integrates exact Boolean minimization (Quine-McCluskey style, bounded at 16 inputs), Espresso-inspired iterative heuristic cover refinement, SAT-assisted local pruning, and a canonical circuit DAG with structural sharing. For real-file compression, a multi-candidate adaptive packer evaluates dozens of reversible representations—including raw codecs, symbolic dictionaries, framed-payload models, reversible-transform circuits, and monotonic-stream encoders—and selects the smallest validated candidate. A key finding is that reversible-transform circuits can discover periodic structure inside neural network weight tensors, achieving **15.96% space savings** on a PyTorch model file where classical codecs such as XZ/LZMA2 reach only 7–9%. The architecture also supports a streaming mode with restartable key-piece blocks and multi-level grouping. Exact byte-for-byte roundtrip validation is mandatory for every selected representation. Rust implementation source code is available at [https://github.com/Geckos-Ink/zBitCompressor.rs](https://github.com/Geckos-Ink/zBitCompressor.rs).
 
 ---
 
@@ -56,7 +54,7 @@ zBitCompressor systematizes these ideas into a framework where many reversible-t
 
 ### 2.4 Model Compression and Quantization
 
-Reducing neural network model file sizes is normally pursued through weight quantization [Hubara et al. 2016], pruning [Han et al. 2015], or distillation [Hinton et al. 2015]—all lossy. Lossless compression of raw model files receives less attention, partly because classical codecs offer limited gain. Our work is orthogonal to quantization: it targets lossless compression of whatever byte representation the model uses, including already-quantized weights.
+Reducing neural network model file sizes is normally pursued through weight quantization [Hubara et al. 2016], pruning [Han et al. 2015], or distillation [Hinton et al. 2015]—all lossy. Lossless compression of raw model files receives less attention, partly because classical codecs offer limited gain. My work is orthogonal to quantization: it targets lossless compression of whatever byte representation the model uses, including already-quantized weights.
 
 ---
 
@@ -69,7 +67,7 @@ A Karnaugh map assigns each combination of $n$ binary input variables to one cel
 zBitCompressor generalizes this idea beyond the small visual grid:
 
 | K-map concept | zBit generalization |
-|---|---|
+| --- | --- |
 | Cell | A byte, a bit, a symbol, a chunk, a transformed position, or a truth-table row |
 | ON-set minterm | A position/assignment where a modeled output bit is `1` |
 | OFF-set | A position/assignment where the output must be `0` |
@@ -98,6 +96,7 @@ graph LR
     C --> D["Select essential implicants"]
     D --> E["Branch-and-bound exact cover\n(minimize terms, then literals)"]
     E --> F["Minimum cover"]
+
 ```
 
 *Figure 1. Exact two-level minimization flow.*
@@ -106,11 +105,11 @@ graph LR
 
 Once a minimum cover is found, it is compiled into a canonical directed acyclic graph (DAG) of logic nodes:
 
-- **Pin**: an input variable.
-- **Not**: bitwise inversion.
-- **And**: product term over a set of literals (one per cube).
-- **Or**: sum over all product terms.
-- **Xor**: parity computation.
+* **Pin**: an input variable.
+* **Not**: bitwise inversion.
+* **And**: product term over a set of literals (one per cube).
+* **Or**: sum over all product terms.
+* **Xor**: parity computation.
 
 Nodes are *interned*: structurally equal subexpressions map to the same node ID. Commutative inputs are sorted; duplicate `And`/`Or` children are deduplicated; `Not(Not(x))` collapses to `x`; constant propagation eliminates `x & false` and `x | true`. This structural canonicalization is essential: it prevents storing duplicated logic and enables future cross-region sharing.
 
@@ -147,6 +146,7 @@ flowchart TD
     F --> G{Score improved?}
     G -->|Yes| B
     G -->|No| H["Output best cover"]
+
 ```
 
 *Figure 2. Espresso-style heuristic cover-refinement loop.*
@@ -164,7 +164,7 @@ The SAT oracle is invoked only for inputs at or below a configurable limit (defa
 The compressor supports multiple optimization targets beyond raw literal count:
 
 | Objective | Primary cost metric |
-|---|---|
+| --- | --- |
 | `LiteralCount` | Total literals across all cubes |
 | `AsicArea` | Proxy: AND2 gates + inversions |
 | `AsicDelay` | Proxy: critical path depth |
@@ -195,6 +195,7 @@ flowchart TD
     C & D & E & F & G & H & I & J --> K["Compare full serialized sizes"]
     K --> L["Select smallest validated candidate"]
     L --> M["Write .zbpk artifact"]
+
 ```
 
 *Figure 3. Adaptive multi-candidate packing architecture.*
@@ -203,30 +204,22 @@ The selection rule has one invariant: **the output is never larger than the raw 
 
 ### 5.2 Candidate Methods
 
-**raw-copy**: Verbatim storage. Baseline fallback.
-
-**indexed-raw**: Scans the input for unique symbols, assigns compact IDs, and writes a bit-packed symbol-index stream. Profitable when the alphabet is small relative to the input length.
-
-**indexed-huffman**: Canonical Huffman coding over the symbol distribution. The codebook is stored as `(symbol, code_length)` pairs; exact bit codes are reconstructed at decode time without storing the tree.
-
-**indexed-circuit**: Each unique symbol is represented as a serialized Boolean circuit over a small truth table. Currently gated to symbol widths above 8 bits, since a raw byte dictionary is denser than per-byte circuit descriptors; the foundation exists for wider symbols and future atlas entries.
-
-**raw-deflate / raw-zstd / raw-xz**: Standard general-purpose codecs. XZ/LZMA2 is evaluated with a multi-parameter tuning matrix (dictionary size, literal context bits, position bits, nice length, match finder, mode) and a cheap XZ-3 pre-ranking pass that eliminates costly full-matrix evaluation when a clear winner exists.
-
-**framed-raw**: Detects runs of CRC32-framed byte blocks—a pattern common in formats such as PNG (IDAT/IEND chunks) and other chunked container formats—and stores only the concatenated payloads plus metadata sufficient to reconstruct exact frame headers and checksums. This avoids paying CRC32 overhead redundantly for every frame.
-
-**monotonic-delta**: Specialized encoder for fixed-width monotonically increasing integer streams. Stores the element width, element count, first value, gap distribution, and an optional trailing-zero shift, then applies a codec to the gap stream. Achieves extreme compression on sequential numeric streams (e.g., 82.60% savings on a 3.2 MB structured binary index).
-
-**recursive-circuit-xz**: The most structurally sophisticated path, described in detail in Section 6.
-
-**adaptive-transformed-xz**: Applies the reversible-transform search pipeline directly to raw inputs that are not CRC32-framed (e.g., PyTorch `.pth` model files). Stores a compact transform-plan dictionary and feeds the transformed payload to the full codec/tuning-matrix selection. The key mechanism behind the tensor-compression gains reported in Section 8.
+* **raw-copy**: Verbatim storage. Baseline fallback.
+* **indexed-raw**: Scans the input for unique symbols, assigns compact IDs, and writes a bit-packed symbol-index stream. Profitable when the alphabet is small relative to the input length.
+* **indexed-huffman**: Canonical Huffman coding over the symbol distribution. The codebook is stored as `(symbol, code_length)` pairs; exact bit codes are reconstructed at decode time without storing the tree.
+* **indexed-circuit**: Each unique symbol is represented as a serialized Boolean circuit over a small truth table. Currently gated to symbol widths above 8 bits, since a raw byte dictionary is denser than per-byte circuit descriptors; the foundation exists for wider symbols and future atlas entries.
+* **raw-deflate / raw-zstd / raw-xz**: Standard general-purpose codecs. XZ/LZMA2 is evaluated with a multi-parameter tuning matrix (dictionary size, literal context bits, position bits, nice length, match finder, mode) and a cheap XZ-3 pre-ranking pass that eliminates costly full-matrix evaluation when a clear winner exists.
+* **framed-raw**: Detects runs of CRC32-framed byte blocks—a pattern common in formats such as PNG (IDAT/IEND chunks) and other chunked container formats—and stores only the concatenated payloads plus metadata sufficient to reconstruct exact frame headers and checksums. This avoids paying CRC32 overhead redundantly for every frame.
+* **monotonic-delta**: Specialized encoder for fixed-width monotonically increasing integer streams. Stores the element width, element count, first value, gap distribution, and an optional trailing-zero shift, then applies a codec to the gap stream. Achieves extreme compression on sequential numeric streams (e.g., 82.60% savings on a 3.2 MB structured binary index).
+* **recursive-circuit-xz**: The most structurally sophisticated path, described in detail in Section 6.
+* **adaptive-transformed-xz**: Applies the reversible-transform search pipeline directly to raw inputs that are not CRC32-framed (e.g., PyTorch `.pth` model files). Stores a compact transform-plan dictionary and feeds the transformed payload to the full codec/tuning-matrix selection. The key mechanism behind the tensor-compression gains reported in Section 8.
 
 ### 5.3 Format: ZBPK v3
 
 The container format encodes only the bits each field actually requires. Header fields use varint encoding; enumeration values occupy only $\lceil\log_2(\text{distinct values})\rceil$ bits; topology nodes are packed into a single MSB-first bit stream where each field contributes the minimum necessary bits:
 
 | Field | Encoding |
-|---|---|
+| --- | --- |
 | `method` (≤ 16 values) | 4 bits |
 | `bits_per_symbol` (0..15) | 4 bits (packed with method) |
 | `original_size`, `dict_size`, `payload_size` | varint |
@@ -253,7 +246,7 @@ The recursive-circuit-xz and adaptive-transformed-xz paths exist to discover and
 The system maintains a library of reversible single-pass transforms:
 
 | Family | Description |
-|---|---|
+| --- | --- |
 | **Identity** | No transformation |
 | **Prev-delta** | Each byte becomes the difference from the previous byte |
 | **Prev-XOR** | Each byte XOR-ed with the previous byte |
@@ -280,6 +273,7 @@ flowchart TD
     F --> G["choose_best_codec\n(XZ tuning matrix, zstd, deflate)"]
     G --> H["Write: transform_kind + period + head + codec\n+ plain_len (compact dict)"]
     H --> I["Decoder: read dict → invert transform\n→ decompress"]
+
 ```
 
 *Figure 4. Adaptive transform-plan selection and serialization.*
@@ -301,6 +295,7 @@ flowchart LR
     F & G --> H["Build circuit topology DAG\n(transform + correction plans)"]
     H --> I["Write dictionary + payload\n+ correction stream"]
     I --> J["Decoder: parse topology →\ninvert transform → apply corrections\n→ reconstruct exact frames"]
+
 ```
 
 *Figure 5. Deflate-aware recursive-circuit-xz path.*
@@ -324,7 +319,7 @@ The streaming mode (`.zbps` format) handles large inputs by splitting them into 
 Each block is represented as a tree of *stream nodes*:
 
 | Node kind | Semantics |
-|---|---|
+| --- | --- |
 | **Piece** | One chunk compressed independently |
 | **Group** | Several adjacent chunks compressed jointly as a single range |
 | **Split** | Binary combination of two child nodes |
@@ -339,6 +334,7 @@ flowchart TD
     E --> F["DP: choose minimum total\nencoded size"]
     F --> G["Write .zbps blocks\nat key-piece boundaries"]
     G --> H["Decoder: parse block tree\n→ decode each node\n→ concatenate"]
+
 ```
 
 *Figure 6. Stream compression planning.*
@@ -347,16 +343,16 @@ flowchart TD
 
 A dynamic-programming planner evaluates candidate nodes at multiple granularities. For each `(start, end)` chunk range within a block, the planner computes:
 
-- a Piece candidate (for single chunks);
-- Group candidates at increasing spans (up to a configurable maximum);
-- Split combinations of already-evaluated sub-ranges.
+* a Piece candidate (for single chunks);
+* Group candidates at increasing spans (up to a configurable maximum);
+* Split combinations of already-evaluated sub-ranges.
 
 Memoization prevents redundant evaluation. The planner selects the combination minimizing total encoded bytes.
 
 ### 7.4 Streaming Profiles
 
 | Profile | Savings | Throughput | Use case |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `realtime-fast` | ~0.10% | 471 MiB/s decompress | Live transcoding, zero-latency |
 | `realtime-balanced` | ~0.14% | 414 MiB/s decompress | Balanced real-time |
 | `realtime-deep` | ~10.05% | 0.34 MiB/s decompress | Offline, ratio-first |
@@ -373,7 +369,7 @@ The realtime-fast and realtime-balanced profiles process one chunk at a time wit
 Four corpora covering qualitatively different data types were used:
 
 | Corpus | File type | Size (bytes) | Description |
-|---|---|---:|---|
+| --- | --- | --- | --- |
 | `paper` | Markdown text | 62,015 | Academic survey document |
 | `primary.3b` | Structured binary | 3,233,613 | Monotonic fixed-width integer stream |
 | `cat` | PNG image | 2,969,404 | Compressed photographic image |
@@ -384,7 +380,7 @@ All experiments were run on the `balanced` compression profile. Validation (`PAS
 ### 8.2 Single-Run Benchmark Results
 
 | Corpus | Original (B) | Compressed (B) | Ratio | Savings | Selected method | Compress (ms) | Decompress (ms) |
-|---|---:|---:|---:|---:|---|---:|---:|
+| --- | --- | --- | --- | --- | --- | --- | --- |
 | `paper` | 62,015 | 20,561 | 0.3315 | 66.85% | `raw-xz` | 76 | 3 |
 | `primary.3b` | 3,233,613 | 562,799 | 0.1740 | 82.60% | `monotonic-delta` | 5,815 | 35 |
 | `cat` | 2,969,404 | 2,670,571 | 0.8994 | 10.06% | `recursive-circuit-xz` | 64,968 | 549 |
@@ -397,7 +393,7 @@ All outputs: **Validation PASS**.
 The tensor benchmark (`depth_anything_v2_vits.pth`, 99.2 MB) is the most instructive case because classical codecs offer limited gain:
 
 | Candidate method | Output size (bytes) | Savings vs. raw |
-|---|---:|---:|
+| --- | --- | --- |
 | raw-copy | 99,218,434 | 0.00% |
 | indexed-raw | 99,218,719 | −0.00% (larger) |
 | indexed-huffman | 92,218,133 | 7.05% |
@@ -415,7 +411,7 @@ The win is impossible for a classical LZ/arithmetic coder to achieve without ext
 For the PNG corpus (`cat_challenge.png`, 2.97 MB), the recursive-circuit-xz path wins by approximately 10% over all classical codecs:
 
 | Candidate method | Output size (bytes) |
-|---|---:|
+| --- | --- |
 | raw-copy | 2,969,433 |
 | framed-raw | 2,965,104 |
 | raw-zstd | 2,969,508 |
@@ -429,7 +425,7 @@ The ~299 KB gain comes from the deflate-aware reconstruction path: by inflating 
 The ZBPK v3 bit-packed format reduces dictionary overhead to negligible levels:
 
 | Corpus | Compressed file | Dictionary footprint | Dict / total |
-|---|---:|---:|---:|
+| --- | --- | --- | --- |
 | `paper` | 20,561 B | ~17 B | 0.083% |
 | `primary.3b` | 562,799 B | ~29 B | 0.005% |
 | `cat` | 2,670,571 B | ~55 B | 0.002% |
@@ -440,7 +436,7 @@ In every case, >99.99% of the compressed file is payload; format overhead is neg
 ### 8.6 Streaming Results on the Cat Corpus
 
 | Profile | Savings | Compress (ms) | Decompress (ms) | Decomp. throughput |
-|---|---:|---:|---:|---:|
+| --- | --- | --- | --- | --- |
 | `realtime-fast` | 0.10% | 1,022 | 6 | 471 MiB/s |
 | `realtime-balanced` | 0.14% | 3,502 | 7 | 414 MiB/s |
 | `realtime-deep` | 10.05% | 193,723 | 8,252 | 0.34 MiB/s |
@@ -453,7 +449,7 @@ Real-time profiles process independently, enabling live streaming with no round-
 Architectural refinements reduced compression times substantially between early and current implementations while preserving or improving ratio:
 
 | Corpus | Earlier time (ms) | Current time (ms) | Speedup |
-|---|---:|---:|---:|
+| --- | --- | --- | --- |
 | `paper` | ~313 | 76 | 4.1× |
 | `primary.3b` | ~16,635 | 5,815 | 2.9× |
 | `cat` | ~112,500 | 64,968 | 1.7× |
@@ -515,7 +511,7 @@ The central experimental finding is that reversible-transform circuits can disco
 
 All results are validated by exact roundtrip reconstruction. The format overhead is negligible (<0.01% of compressed size). Decompression is fast enough for practical use (5–530 MiB/s). The streaming mode supports restartable key-piece decoding suitable for real-time applications.
 
-The next step is the Circuit Atlas: a cross-regional mechanism for recognizing and sharing the Boolean generation rules of distant file regions, which we expect to produce further gains on structured model files and image archives where repeated structural motifs span non-contiguous byte ranges.
+The next step is the Circuit Atlas: a cross-regional mechanism for recognizing and sharing the Boolean generation rules of distant file regions, which I expect to produce further gains on structured model files and image archives where repeated structural motifs span non-contiguous byte ranges.
 
 ---
 
