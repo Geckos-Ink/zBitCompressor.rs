@@ -1,6 +1,6 @@
 # zBit Circuit-Based Compression Roadmap
 
-_Last updated: 2026-05-23_
+_Last updated: 2026-05-26_
 
 ## Honest Note on Dictionary Compaction Limits (v3 retrospective)
 
@@ -71,6 +71,246 @@ items that actually move ratio are payload-level, not header-level.
   `primary.3b.bin` get no measurable headroom from the transform plan and the plan-search
   cost is not worth paying). Test coverage:
   `pack::tests::adaptive_pack_can_choose_adaptive_transformed_xz_and_roundtrips`.
+
+## IMMEDIATE: Critical Architectural Debt (Blocks All Circuit-Level Gains)
+
+These are not enhancements. They are structural corrections to decisions that rendered the
+Boolean circuit layer cosmetic. Every Phase 0–9 item depends on these being addressed first.
+Two-sentence summary: **bit-packed dynamic encoding was applied to the file header but not to
+the circuit definitions inside it; the exact minimizer was bounded at 16 inputs but no
+hierarchical decomposition was added to cover the rest; together, the Boolean layer does not
+participate in actual compression of large files.**
+
+### IMMED-1. Bit-Stream Encoding Must Be the Universal Primitive, Not a Header-Only Feature
+
+**The problem.** ZBPK v3 spends careful engineering ensuring the file header occupies exactly
+the bits its enumeration values require — method (4 bits), transform kind (6 bits), period/head
+as nibble-varints, topology parent index as `⌈log₂(N_prev)⌉` bits. The result: ~110 bytes of
+header overhead. This is correct in principle.
+
+The same principle was never applied to the content these headers describe. Circuit definitions,
+implicant lists, cube encodings, DAG node records, and residual payloads are written as
+byte-aligned fixed-width structs or as raw byte slices inside the payload area. There is no
+continuous bit stream for circuit-level data. The bit-packing was applied to the wrapping
+envelope only; the wrapped data is still padded to byte boundaries everywhere.
+
+The consequence: even if a shared circuit were discovered, the cost to serialize it is large
+enough (tens of bytes per circuit node) that sharing rarely pays off, which is one structural
+reason the circuit atlas was never built. You cannot profitably reference a circuit that costs
+50 bytes to describe when a reference itself could cost 5 bits.
+
+**The fix.** Extend the bit-stream writer/reader used for header fields so it becomes the
+universal primitive for ALL structured data at every recursive level:
+
+- Every `CircuitTopologyNode` field uses variable-width encoding down to its content. Already
+  partially done for topology — complete it for circuit content.
+- Every cube/implicant encodes as: `mask_popcount` (number of fixed literals, short varint),
+  followed by `mask_popcount` × `(variable_index, polarity)` pairs. A single-literal implicant
+  costs ≈3–5 bits. A 4-literal implicant costs ≈12 bits. Compare to any current fixed-width
+  struct.
+- Every DAG node uses a type tag (3–4 bits) followed by variable-width child IDs using
+  `⌈log₂(N_prev_nodes)⌉` bits — already designed for topology nodes, apply consistently to all
+  circuit content.
+- Residual byte runs: length varint, then bytes. No fixed-size run headers.
+- Every recursive level (transform plan → sub-plan → implicant cover → implicant → cube) chains
+  into the same bit stream. Not separate byte arrays pointed to by a header.
+
+Define a `CircuitBitStream` struct that owns the interning table:
+
+```rust
+pub(crate) struct CircuitBitStream {
+    bits: BitVec,
+    interning: HashMap<CircuitContentHash, CircuitId>,
+    next_id: CircuitId,
+}
+
+impl CircuitBitStream {
+    /// First occurrence: write full definition. Subsequent: write only the ID.
+    pub fn write_circuit_or_ref(&mut self, circuit: &CircuitDef) -> CircuitId;
+    /// Cost in bits of a reference at current interning table size.
+    pub fn ref_bits(&self) -> u32 { self.next_id.ilog2() + 1 }
+}
+```
+
+Every encoder that emits circuit content (transform topology, implicant cover, DAG node) must go
+through `CircuitBitStream`. The second region to use a circuit pays only `⌈log₂(N)⌉` bits for
+it, not a full re-serialization. This makes cross-regional sharing automatic and cheap.
+
+**Acceptance criteria:**
+- A truth-table circuit for a 3-variable function serializes in under 10 bits.
+- A file with 100 regions using the same 3-node transform topology emits the definition once
+  (≈30 bits) and 99 references (≈7 bits each for `log₂(100)`), totaling ≈723 bits. Current
+  cost: 100 × 18 bits = 1800 bits. Shared encoding must be measurably smaller.
+- The decoder reads circuit-level data from the same bit stream, reconstructing the interning
+  table on the fly. No separate byte slices for circuit content.
+- This replaces the current separate `topology_bits` section in the recursive dictionary.
+
+### IMMED-2. Boolean Minimization Must Not Be Bounded at 16 Inputs
+
+**The problem.** The exact minimizer is bounded at 16 inputs because it stores a full truth
+table (2^n entries). At 16 inputs this is 64 K minterms. Beyond 16 the system falls through to
+Espresso-style heuristic refinement. This is not wrong for truth-table-based synthesis — it is
+wrong as a ceiling on what circuits the compressor can describe.
+
+16 inputs bounds the compressor to describing functions of 16 bits of context. A function that
+generates a 4-byte float32 element from a stride index already exceeds this. A function that
+models the bit-plane structure of 8 bytes of tensor weight from a 3D index (channel × row ×
+col) requires ~30 inputs. The periodic-stride pattern behind the 15.96% tensor savings IS
+expressible as a Boolean function over ~30 inputs. It is NOT enumerable as a truth table but IS
+expressible as a small hierarchical circuit. The 16-input limit silently excludes the exact
+structures this system was designed to exploit.
+
+The bug is conflating "number of function inputs" with "truth-table size". These are equal only
+at leaf level. Top-level circuits over large input spaces must be decomposed.
+
+**The fix.** Add hierarchical decomposition above the existing bounded exact minimizer:
+
+1. **Shannon cofactor decomposition.** For n > 16 inputs, select a splitting variable
+   (`f = x·f|x=1 + ¬x·f|x=0`), recursively minimize both cofactors, and combine via a mux
+   node. Recursion depth is bounded by the resulting literal count, not by 2^n. This is the
+   standard path in every serious synthesis tool.
+
+2. **Structural input encoding.** Compression-context circuit inputs are not arbitrary bit
+   positions — they are structured: `(period_index, byte_offset_within_period, bit_plane)`.
+   This structure must be explicit. A function over `(period=4, offset=0..3, plane=0..7)` has
+   5 relevant input bits, not 30 random bits. Model inputs as a product of small groups; apply
+   decomposition along group boundaries before falling back to Shannon.
+
+3. **BDD backend for medium-depth functions.** For 10 < n ≤ 24 inputs, try an ordered BDD as
+   the intermediate representation before committing to Shannon splitting. BDD size grows
+   linearly with circuit nodes, not exponentially with inputs, for the strided/periodic
+   functions that appear in compression contexts. Reject and fall back to heuristic if BDD
+   size exceeds a configurable node budget.
+
+   Decision table:
+   - n ≤ 10: truth table, exact Q-M.
+   - 10 < n ≤ 20: try BDD, fall back to heuristic if node count > budget.
+   - n > 20: Shannon decomposition into sub-problems of size ≤ 16, minimize each exactly.
+
+4. **Do not remove the 16-input exact path.** Keep it as the leaf minimizer. The limit is
+   correct for the truth-table representation. What must be removed is the assumption that
+   16 inputs is the limit of what can be described — that is the architectural bug.
+
+**Acceptance criteria:**
+- A function over a 4-byte periodic stride (32 inputs, strongly decomposable) can be
+  represented and serialized as a hierarchical circuit.
+- A bit-plane separation function (input: 8 bytes, output: reordered bits) can be represented
+  as a circuit, not only as a `CircuitTransformKind` enum variant.
+- The exact minimizer remains operative at leaf level (n ≤ 16).
+- Compression of the tensor corpus does not regress; circuits can explicitly describe the
+  periodic-stride pattern, not only encode it implicitly via a transform-kind integer.
+
+### IMMED-3. Circuit Sharing Requires the Bit-Stream Interning From IMMED-1 to Exist First
+
+**The problem.** Cross-regional circuit reuse (`GlobalSlice`, the Atlas) is the stated goal of
+this entire roadmap. It has not been implemented, and the structural reason is IMMED-1: without
+a cheap bit-level encoding for circuit definitions, sharing a circuit costs more than repeating
+the per-region representation it is supposed to replace. No set-cover optimizer will select an
+atlas entry that costs more than it saves.
+
+The current `GlobalSlice` mechanism stores one globally-compressed payload and points decoded
+output ranges at slices of it. This is output-slice reuse, not semantic circuit reuse. It
+requires the entire global output to be reconstructed before any slice can be used, which
+breaks streaming restart guarantees and makes the restart cost proportional to global payload
+size.
+
+**The fix is not a separate implementation — it is the consequence of IMMED-1 and IMMED-2.**
+Once circuit definitions are encoded in the `CircuitBitStream` with interning (IMMED-1) and
+circuits can represent the relevant functions without a 16-input ceiling (IMMED-2), circuit
+sharing becomes the natural default behavior: the second occurrence of any circuit definition is
+automatically encoded as a back-reference, at `⌈log₂(N)⌉` bits cost. No explicit "atlas
+candidate" infrastructure is needed to make basic circuit reuse work; it falls out of the
+encoding layer.
+
+The Atlas infrastructure (Phases 2–6 below) then handles the harder problems: discovering
+non-identical but structurally similar regions, sparse residuals, and globally optimal range
+selection. But it can be built incrementally on top of a base layer that already does exact
+circuit sharing cheaply.
+
+**Acceptance criteria:**
+- Two distant byte ranges with identical transform topology and parameters are automatically
+  encoded with one definition + one reference, not two definitions.
+- Stream blocks that share a transform plan reference the shared definition without
+  reconstructing the global decoded output.
+- `GlobalSlice` nodes are no longer required for the common case of repeated exact circuits.
+
+### IMMED-4. Correction Stream: Reduce Tokens Before CABAC, Not After
+
+**The problem.** The preflate correction stream is CABAC-coded; its byte-level entropy is
+near-uniform; no post-hoc transform reduces it. This analysis is correct as far as it goes.
+The mistake is treating the CABAC output as the invariant and looking for wins downstream of it.
+
+The real opportunity is reducing the number of corrections before CABAC coding, by improving
+the predictor within the decomposition pipeline. Typed substreams (one CABAC instance per
+`CodecCorrection` family) have lower per-family entropy than the mixed stream; CABAC's context
+model adapts faster to a homogeneous token distribution. This is within this codebase's reach
+without upstream preflate-rs changes.
+
+**The fix:**
+
+1. After `preflate_whole_deflate_stream`, decode `ReconstructionData` with `bitcode::decode`.
+   Then decode the inner `corrections: Vec<u8>` further by running `PredictionDecoderCabac` to
+   recover the raw `CodecCorrection` token stream.
+2. Split tokens into per-family vectors: literal corrections, length corrections, distance
+   corrections, Huffman tree corrections, block boundary corrections.
+3. Re-encode each typed vector with its own CABAC context (or a simpler range coder tuned to
+   the token-type distribution).
+4. Emit the typed substreams through `CircuitBitStream` — each substream is one circuit-level
+   data blob with its own varint length header.
+5. Total bytes across typed substreams must beat the current single mixed stream or the path
+   is rejected. The existing `choose_correction_transform_plan` fallback remains.
+
+**Acceptance criteria:**
+- Correction stream bytes for cat corpus drop measurably below the current 284 KB baseline.
+- Roundtrip validation passes (corrections still reconstruct the original DEFLATE stream).
+- Per-family CABAC model shows lower cross-entropy on held-out data than the mixed model.
+- If typed encoding does not win on a given input, fallback to single-stream path is automatic.
+
+### IMMED-5. Compression Throughput: Complete the Parallelism, Don't Gate Behind Profiles
+
+**The problem.** Deep profile runs at ~0.16 MiB/s compression throughput (628 s for 99 MB).
+`rayon` is already a dependency and is used in some paths, but the bottleneck operations are
+not parallelized where it counts:
+
+- `choose_best_tuned_xz_candidate` iterates the parameter matrix sequentially. XZ encode calls
+  are independent and embarrassingly parallel.
+- `choose_adaptive_transform_plan` runs the XZ-3 ranking pass and subsequent full evaluations
+  sequentially per transform candidate.
+- `build_recursive_circuit_stream` preflate chain-length candidates are partially parallelized
+  but correction transform/codec search is sequential.
+
+**The fix:**
+
+1. **XZ tuning matrix: fully parallel.** Replace the inner loop in
+   `choose_best_tuned_xz_candidate` with a `par_iter()` over the full parameter matrix.
+   Each `xz_encode(data, params)` call is independent. Collect results, take the minimum.
+
+2. **Transform plan search: two-level parallel.** In `choose_adaptive_transform_plan`:
+   - Quick-rank pass (XZ-3 on the sample subset): `par_iter()` over all transform candidates.
+   - Top-k full evaluations: `par_iter()` over surviving candidates, each running the full
+     codec/tuning selection internally.
+
+3. **Work-stealing budget.** Add `max_parallel_codec_threads: usize` to `CompressionBudgets`
+   so `balanced` limits parallelism (avoiding I/O saturation) while `deep`/`research` use all
+   available cores.
+
+4. **Pipeline the three-stage search.** The current pattern is: apply-transform → XZ-3 score →
+   prune → XZ-9 full, executed serially. These stages should pipeline: all XZ-3 calls for all
+   candidates launch simultaneously, pruning runs as results arrive, all surviving XZ-9 calls
+   launch simultaneously. This maximizes CPU utilization without changing the selection result.
+
+**Target:** deep profile compression throughput ≥ 2 MiB/s on the tensor corpus (from 0.16
+MiB/s now). The XZ tuning matrix alone accounts for >50% of current wall time and is trivially
+parallelizable with `par_iter`.
+
+**Acceptance criteria:**
+- `depth_anything` compression time < 120 s on a multicore machine (was 628 s), without
+  ratio regression.
+- `fast` and `balanced` profiles are not slowed by the parallel infrastructure (thread pool
+  is bounded by profile budget).
+- Throughput is reported in MiB/s in all benchmark output alongside existing timing fields.
+
+---
 
 ## Near-Term Ratio Improvements (Concrete, Pre-Atlas)
 
@@ -160,9 +400,13 @@ Paths that *would* improve correction encoding, all requiring upstream changes t
    algorithm detection, better add-policy estimator). This shrinks the input to CABAC
    instead of compressing its output. Win is highly file-dependent.
 
-Recommendation: keep N2 in the roadmap as an upstream-coordinated work item. From this
-codebase the entropy floor of CABAC is the binding constraint and no transform / codec
-combination below preflate-rs can move it.
+Recommendation: see **IMMED-4** (above) for the in-tree path that bypasses this blocker by
+decoding the CABAC token stream back to typed `CodecCorrection` tokens and re-encoding each
+type with its own model — without splitting the opaque byte stream. The upstream-coordinated
+approach described below remains valid as a higher-ceiling alternative once IMMED-4 is
+implemented and measured. From this codebase, the entropy floor of the mixed CABAC byte
+stream is the binding constraint for post-hoc transforms; IMMED-4 attacks the model before
+CABAC encoding, not after.
 
 Mitigation we *do* apply already: `choose_correction_transform_plan` keeps testing
 transforms + codecs on every preflate run, so when preflate-rs starts emitting more
