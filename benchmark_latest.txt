@@ -1,0 +1,73 @@
+zBit-rs Real File Benchmark Report
+Generated: 2026-05-25 23:56:12
+Input file: papers/zbit-algorithmsResearch.md
+Compressed artifact: benchmark_algorithmsResearch.zbpk
+
+Active profile: balanced
+Selected method: raw-xz
+Selection reason: raw-xz improves size: 62044 -> 20573 bytes
+Circuit evaluation rule: symbol width <= 8 bits: raw dictionary is denser than circuit descriptors
+
+Skipped candidates:
+- recursive-circuit-xz skipped: framed payload analyzer unavailable
+- adaptive-transformed-xz skipped: input below 128 KiB amortisation threshold
+- indexed-circuit skipped: symbol width <= 8 bits: raw dictionary is denser than circuit descriptors
+
+Raw candidate size (bytes): 62044
+Indexed-raw candidate size (bytes): 54407
+Indexed-circuit candidate size (bytes): skipped by rules
+Indexed-huffman candidate size (bytes): 37549
+Raw-deflate candidate size (bytes): 22061
+Raw-zstd candidate size (bytes): 20965
+Raw-xz candidate size (bytes): 20573
+Framed-raw candidate size (bytes): unavailable
+Recursive-circuit-xz candidate size (bytes): unavailable
+Monotonic-delta candidate size (bytes): unavailable
+Adaptive-transformed-xz candidate size (bytes): unavailable
+
+Original size (bytes): 62015
+Compressed size (bytes): 20561
+Compression ratio (compressed/original): 0.331549
+Space savings (%): 66.85
+
+Compression time (ms): 87.813
+Decompression time (ms): 2.532
+Compression throughput (MiB/s): 0.674
+Decompression throughput (MiB/s): 23.360
+
+Candidate timing breakdown (ms):
+- index stream build: 0.948
+- huffman stream build: 1.332
+- raw-deflate encode: 2.013
+- raw-zstd encode: 23.256
+- raw-xz encode: 59.800
+- framed extraction: 0.118
+- recursive preflate search: 0.000
+- recursive transform sampling: 0.000
+- recursive transform evaluation: 0.000
+- recursive correction modeling: 0.000
+- recursive total: 0.000
+- candidate validation: 0.000
+
+Cache stats:
+- codec hits/misses: 0/0
+- tuned-xz hits/misses: 0/1
+- preflate hits/misses: 0/0
+- stream-range hits/misses: 0/0
+
+Resource usage (KiB):
+- RSS before compression: n/a
+- RSS after compression: n/a
+- RSS after decompression: n/a
+- Compression RSS delta: n/a
+- Decompression RSS delta: n/a
+- Peak RSS (VmHWM): n/a
+
+Unique symbols: 114
+Bits per symbol index: 0
+Raw dictionary bytes: 114
+Circuit dictionary bytes: 0
+Huffman dictionary bytes: 0
+Packed index payload bytes: 20544
+
+Output validation: PASS

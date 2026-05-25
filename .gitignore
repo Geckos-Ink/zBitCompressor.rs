@@ -25,3 +25,4 @@ assets/depth_anything_v2_vits.pth
 zbit-rs/*.zbpk
 zbit-rs/*.zbps
 .claude/scheduled_tasks.lock
+benchmark_algorithmsResearch.zbpk

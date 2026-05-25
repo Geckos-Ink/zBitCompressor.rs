@@ -886,8 +886,27 @@ fn compress_stream_to_bytes(
     input: &[u8],
     options: &StreamPackOptions,
 ) -> ZbitResult<(Vec<u8>, StreamPackStats)> {
+    let profile = CompressionProfile::from_env();
+    let budgets = CompressionBudgets::from_profile(profile);
+    if budgets.max_parallel_codec_threads != 0 {
+        if let Ok(pool) = rayon::ThreadPoolBuilder::new()
+            .num_threads(budgets.max_parallel_codec_threads)
+            .build()
+        {
+            return pool.install(move || compress_stream_to_bytes_inner(input, options, profile));
+        }
+    }
+    compress_stream_to_bytes_inner(input, options, profile)
+}
+
+fn compress_stream_to_bytes_inner(
+    input: &[u8],
+    options: &StreamPackOptions,
+    profile: CompressionProfile,
+) -> ZbitResult<(Vec<u8>, StreamPackStats)> {
     validate_stream_options(options)?;
-    let mut context = CompressionContext::new(CompressionProfile::from_env());
+    let total_timer = Instant::now();
+    let mut context = CompressionContext::new(profile);
 
     let chunks = split_stream_chunks(input, options.chunk_size);
     let total_chunks = chunks.len();
@@ -1101,7 +1120,7 @@ fn compress_stream_to_bytes(
             shared_grouping_payload_used: false,
             active_profile: context.profile.name().to_string(),
             skipped_candidates: context.skipped_candidates,
-            timings: context.timings,
+            timings: stream_finalize_timings(context.timings, total_timer, input.len()),
             cache_stats: context.cache_stats,
         };
 
@@ -1277,11 +1296,26 @@ fn compress_stream_to_bytes(
         shared_grouping_payload_used: shared_grouping_payload_bytes.is_some(),
         active_profile: context.profile.name().to_string(),
         skipped_candidates: context.skipped_candidates,
-        timings: context.timings,
+        timings: stream_finalize_timings(context.timings, total_timer, input.len()),
         cache_stats: context.cache_stats,
     };
 
     Ok((out, stats))
+}
+
+fn stream_finalize_timings(
+    mut timings: CandidateTimingStats,
+    total_timer: Instant,
+    original_size: usize,
+) -> CandidateTimingStats {
+    let total_ms = total_timer.elapsed().as_secs_f64() * 1000.0;
+    timings.total_compression_ms = total_ms;
+    timings.compression_throughput_mib_s = if total_ms > 0.0 {
+        (original_size as f64) / (total_ms / 1000.0) / (1024.0 * 1024.0)
+    } else {
+        0.0
+    };
+    timings
 }
 
 pub fn compress_adaptive_stream_to_file(

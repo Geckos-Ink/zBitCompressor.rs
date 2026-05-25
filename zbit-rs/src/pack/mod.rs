@@ -5,6 +5,7 @@ include!("core.rs");
 include!("format.rs");
 include!("codecs.rs");
 include!("transforms.rs");
+include!("bitstream.rs");
 include!("recursive.rs");
 include!("stream.rs");
 include!("tests.rs");

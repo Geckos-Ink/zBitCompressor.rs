@@ -185,6 +185,31 @@ impl CompressionProfile {
     fn should_attempt_recursive_on_stream_shared_payload(self) -> bool {
         matches!(self, Self::Deep | Self::Research)
     }
+
+    fn max_parallel_codec_threads(self) -> usize {
+        // IMMED-5 work-stealing budget: bound the rayon pool used by codec/transform searches.
+        // 0 means "use the global default" (all available cores). balanced is kept slightly
+        // below max so I/O-saturated runs don't thrash; deep/research take everything.
+        match self {
+            Self::Fast => 2,
+            Self::Balanced => 0,
+            Self::Deep | Self::Research => 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CompressionBudgets {
+    /// 0 = rayon global default.
+    pub max_parallel_codec_threads: usize,
+}
+
+impl CompressionBudgets {
+    fn from_profile(profile: CompressionProfile) -> Self {
+        Self {
+            max_parallel_codec_threads: profile.max_parallel_codec_threads(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -203,6 +228,10 @@ pub struct CandidateTimingStats {
     pub candidate_validation_ms: f64,
     pub stream_block_planning_ms: f64,
     pub stream_global_payload_ms: f64,
+    /// IMMED-5: wall-clock time spent inside the encoder (excludes file I/O).
+    pub total_compression_ms: f64,
+    /// IMMED-5: derived MiB/s, original_size / total_compression_ms.
+    pub compression_throughput_mib_s: f64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -670,6 +699,8 @@ struct CompressionCache {
 #[derive(Debug)]
 struct CompressionContext {
     profile: CompressionProfile,
+    #[allow(dead_code)] // IMMED-5: held for inner par_iter sites that want to reconsult the budget
+    budgets: CompressionBudgets,
     timings: CandidateTimingStats,
     skipped_candidates: Vec<String>,
     cache_stats: CacheStats,
@@ -680,10 +711,28 @@ impl CompressionContext {
     fn new(profile: CompressionProfile) -> Self {
         Self {
             profile,
+            budgets: CompressionBudgets::from_profile(profile),
             timings: CandidateTimingStats::default(),
             skipped_candidates: Vec::new(),
             cache_stats: CacheStats::default(),
             cache: CompressionCache::default(),
+        }
+    }
+
+    /// Run a closure inside a rayon thread pool sized by the active budget.
+    /// When max_parallel_codec_threads is 0 (or 1), uses the global pool directly.
+    #[allow(dead_code)] // IMMED-5: kept for downstream callers that want a scoped pool install
+    fn with_codec_pool<R, F: FnOnce() -> R + Send>(&self, f: F) -> R
+    where
+        R: Send,
+    {
+        let n = self.budgets.max_parallel_codec_threads;
+        if n == 0 {
+            return f();
+        }
+        match rayon::ThreadPoolBuilder::new().num_threads(n).build() {
+            Ok(pool) => pool.install(f),
+            Err(_) => f(),
         }
     }
 
@@ -1477,7 +1526,25 @@ fn write_pack_bytes(
 }
 
 fn compress_adaptive_to_bytes(input: &[u8]) -> ZbitResult<(Vec<u8>, PackStats)> {
-    let mut context = CompressionContext::new(CompressionProfile::from_env());
+    let profile = CompressionProfile::from_env();
+    let budgets = CompressionBudgets::from_profile(profile);
+    if budgets.max_parallel_codec_threads != 0 {
+        if let Ok(pool) = rayon::ThreadPoolBuilder::new()
+            .num_threads(budgets.max_parallel_codec_threads)
+            .build()
+        {
+            return pool.install(move || compress_adaptive_to_bytes_inner(input, profile));
+        }
+    }
+    compress_adaptive_to_bytes_inner(input, profile)
+}
+
+fn compress_adaptive_to_bytes_inner(
+    input: &[u8],
+    profile: CompressionProfile,
+) -> ZbitResult<(Vec<u8>, PackStats)> {
+    let total_timer = Instant::now();
+    let mut context = CompressionContext::new(profile);
 
     let index_timer = Instant::now();
     let stream = build_index_stream(input)?;
@@ -1671,8 +1738,15 @@ fn compress_adaptive_to_bytes(input: &[u8]) -> ZbitResult<(Vec<u8>, PackStats)> 
 
     let active_profile = context.profile.name().to_string();
     let skipped_candidates = context.skipped_candidates;
-    let timings = context.timings;
+    let mut timings = context.timings;
     let cache_stats = context.cache_stats;
+    let total_ms = total_timer.elapsed().as_secs_f64() * 1000.0;
+    timings.total_compression_ms = total_ms;
+    timings.compression_throughput_mib_s = if total_ms > 0.0 {
+        (input.len() as f64) / (total_ms / 1000.0) / (1024.0 * 1024.0)
+    } else {
+        0.0
+    };
 
     let stats = PackStats {
         original_size: input.len(),
