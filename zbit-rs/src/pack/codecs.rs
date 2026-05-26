@@ -909,6 +909,35 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             depth: 4000,
             delta_dist: 0,
         },
+        // Large-dictionary variants for inputs > 64 MiB. LZMA2's preset 9 default
+        // dict_size is 64 MiB; on 95 MiB+ payloads (e.g. the depth_anything tensor file)
+        // this means matches across the file midpoint are unreachable from the matcher.
+        // A 128 MiB dict captures cross-half repeats; a 256 MiB dict covers files up to
+        // ~256 MiB end-to-end. Memory cost is ~10× dict_size during encode, so gate to
+        // deep/research via deep_search_xz_budget (these entries are placed AFTER
+        // depth-only entries so the existing budget governs them).
+        XzTuningParams {
+            literal_context_bits: 3,
+            literal_position_bits: 0,
+            position_bits: 0,
+            dict_size: 128 * 1024 * 1024,
+            nice_len: 273,
+            match_finder: MatchFinder::BinaryTree4,
+            mode: Mode::Normal,
+            depth: 0,
+            delta_dist: 0,
+        },
+        XzTuningParams {
+            literal_context_bits: 3,
+            literal_position_bits: 0,
+            position_bits: 2,
+            dict_size: 128 * 1024 * 1024,
+            nice_len: 273,
+            match_finder: MatchFinder::BinaryTree4,
+            mode: Mode::Normal,
+            depth: 0,
+            delta_dist: 0,
+        },
         // Delta pre-filter variants: useful for fixed-stride structured payloads such as
         // channel-interleaved image bytes (RGB=3, RGBA=4) or 16/32-bit aligned binary tables.
         // The delta filter computes `out[i] = data[i] - data[i - dist]` byte-wise, then LZMA2
@@ -985,13 +1014,18 @@ fn delta_xz_budget(_profile: CompressionProfile) -> (usize, usize) {
 
 fn deep_search_xz_budget(profile: CompressionProfile) -> (usize, usize) {
     // (normal_deep_budget, extreme_deep_budget): how many of the trailing deep-search tunings
-    // (depth > preset default) to probe. Off for fast/balanced because each candidate roughly
-    // doubles per-encode time; deep/research can afford one or two for the chance of finding a
-    // longer back-reference in image-like payloads with global motifs.
+    // (depth > preset default OR dict_size > 64 MiB) to probe. Off for fast/balanced because
+    // each candidate roughly doubles per-encode time and 128 MiB-dict variants need ~1.5 GiB
+    // memory; deep/research can afford a few for the chance of finding a longer back-reference
+    // in image-like payloads with global motifs or cross-half matches in >64 MiB inputs.
+    //
+    // Matrix layout (between deep_first_idx and delta_first_idx):
+    //   [0] depth=2000, [1] depth=4000, [2] dict=128MiB pb=0, [3] dict=128MiB pb=2
+    // Deep budget covers items 0..2 (one each of depth+ and dict-128); research adds [3].
     match profile {
         CompressionProfile::Fast | CompressionProfile::Balanced => (0, 0),
-        CompressionProfile::Deep => (2, 1),
-        CompressionProfile::Research => (2, 2),
+        CompressionProfile::Deep => (3, 2),
+        CompressionProfile::Research => (4, 3),
     }
 }
 

@@ -1673,6 +1673,47 @@ fn choose_adaptive_transform_plan(
         }
     }
 
+    // Word-size periods are unconditionally relevant for binary inputs with
+    // float32/float64 structure. They are usually picked up by autocorrelation,
+    // but on container files (PyTorch .pth = ZIP-wrapped float tensors) the
+    // dominant autocorrelation is at ZIP-entry boundaries (~2 MB), which masks
+    // the 4/8-byte stride. Forcing them costs 4 extra XZ-3 ranking encodes per
+    // recursive transform search — measured at ~110 s on the cat-challenge
+    // corpus where they don't win, so gate to deep/research where the user is
+    // already paying for thorough search. On balanced/fast the existing
+    // autocorrelation path covers the common cases.
+    if matches!(
+        profile,
+        CompressionProfile::Deep | CompressionProfile::Research
+    ) {
+        for forced in [
+            CircuitTransformPlan {
+                kind: CircuitTransformKind::PeriodicGather,
+                period: 4,
+                head: 0,
+            },
+            CircuitTransformPlan {
+                kind: CircuitTransformKind::PeriodicGather,
+                period: 8,
+                head: 0,
+            },
+            CircuitTransformPlan {
+                kind: CircuitTransformKind::PeriodicHeadTail,
+                period: 4,
+                head: 1,
+            },
+            CircuitTransformPlan {
+                kind: CircuitTransformKind::PeriodicHeadTailTailGather,
+                period: 4,
+                head: 1,
+            },
+        ] {
+            if selected_set.insert(forced) {
+                selected.push(forced);
+            }
+        }
+    }
+
     let trace_recursive = std::env::var_os("ZBIT_TRACE_RECURSIVE").is_some();
     let eval_timer = Instant::now();
 
