@@ -254,6 +254,80 @@ impl BitSerializable for CircuitTransformPlan {
     }
 }
 
+// IMMED-3: BitSerializable for CircuitTopologyNode mirrors the existing
+// compact-topology field layout (1-bit relation, 2-bit order, 6-bit kind
+// index, 1-bit is_root, optional parent_index, nibble-varint param_a/b).
+// Encoded per-node bit count matches `compact_topology_node_bit_len` exactly
+// when prev_count == 0 (root, no parent); deeper nodes encoded via this
+// trait pay the same per-node budget as today's compact-topology section.
+//
+// `parent_id` is encoded as a 32-bit varint rather than a context-dependent
+// `ceil(log2(prev_count))` width because `BitSerializable::read_bits` does
+// not have access to the surrounding topology's `prev_count`. When a future
+// session wires this into the live recursive-dictionary format, it will
+// either:
+//   (a) augment BitSerializable with an associated context type, or
+//   (b) embed parent indices in a sidecar list, or
+//   (c) replace this with a specialised TopologyBitStream that threads
+//       prev_count through write_bits/read_bits explicitly.
+// Option (c) is cleanest; this impl is a compatibility stand-in that's
+// correct, just not maximally compact.
+impl BitSerializable for CircuitTopologyNode {
+    fn write_bits(&self, bw: &mut BitWriter) {
+        bw.write_bits((self.relation & 1) as u64, 1);
+        bw.write_bits((self.order & 0x3) as u64, 2);
+        let kind_index = kind_to_compact_index(self.kind).unwrap_or(self.kind & 0x3F);
+        bw.write_bits(kind_index as u64, 6);
+        let is_root = self.parent_id == u32::MAX;
+        bw.write_bits(if is_root { 1 } else { 0 }, 1);
+        if !is_root {
+            bw.write_nibble_varint(self.parent_id as u64);
+        }
+        bw.write_nibble_varint(self.param_a as u64);
+        bw.write_nibble_varint(self.param_b as u64);
+    }
+    fn read_bits(br: &mut BitReader<'_>) -> ZbitResult<Self> {
+        let relation = br.read_bits(1)? as u8;
+        let order = br.read_bits(2)? as u16;
+        let kind_index = br.read_bits(6)? as u8;
+        let kind = compact_index_to_kind(kind_index).ok_or_else(|| {
+            ZbitError::Parse(format!(
+                "CircuitTopologyNode bitstream: invalid kind index {kind_index}"
+            ))
+        })?;
+        let is_root = br.read_bits(1)? == 1;
+        let parent_id = if is_root {
+            u32::MAX
+        } else {
+            br.read_nibble_varint()? as u32
+        };
+        let param_a = br.read_nibble_varint()? as u32;
+        let param_b = br.read_nibble_varint()? as u32;
+        Ok(CircuitTopologyNode {
+            id: 0, // implicit (caller assigns sequential ids when reading a chain)
+            parent_id,
+            relation,
+            order,
+            kind,
+            param_a,
+            param_b,
+            hash64: 0, // overall decode pipeline validates topology end-to-end
+        })
+    }
+    fn content_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(1 + 2 + 1 + 1 + 4 + 4 + 4);
+        out.push(self.relation);
+        out.extend_from_slice(&self.order.to_le_bytes());
+        out.push(self.kind);
+        let is_root = self.parent_id == u32::MAX;
+        out.push(if is_root { 1 } else { 0 });
+        out.extend_from_slice(&self.parent_id.to_le_bytes());
+        out.extend_from_slice(&self.param_a.to_le_bytes());
+        out.extend_from_slice(&self.param_b.to_le_bytes());
+        out
+    }
+}
+
 #[cfg(test)]
 mod bitstream_integration_tests {
     use super::*;
@@ -299,6 +373,94 @@ mod bitstream_integration_tests {
         for i in 0..100 {
             let (_id, got) = reader.read_def_or_ref::<CircuitTransformPlan>().unwrap();
             assert_eq!(got, plan, "occurrence {i} must roundtrip");
+        }
+    }
+
+    /// IMMED-3 acceptance: two distant byte ranges with identical topology
+    /// nodes get one definition + one reference, not two definitions.
+    /// This is the ROADMAP-3 acceptance criterion: when the cross-region
+    /// encoder (Phase 2) starts emitting multi-region transforms with shared
+    /// structure, the savings ratio depends entirely on this interning
+    /// behaviour at the encoding layer being correct.
+    #[test]
+    fn immed_3_distant_regions_share_topology() {
+        // A 3-node topology that appears in two distant "regions" of the
+        // simulated cross-region stream. With sharing, region B emits only
+        // a tag + 1-bit reference per node; without sharing, region B emits
+        // a full re-serialisation of the 3 nodes.
+        let nodes_a = vec![
+            CircuitTopologyNode {
+                id: 1,
+                parent_id: u32::MAX,
+                relation: 0,
+                order: 0,
+                kind: 1,
+                param_a: 4,
+                param_b: 0,
+                hash64: 0,
+            },
+            CircuitTopologyNode {
+                id: 2,
+                parent_id: 1,
+                relation: 1,
+                order: 1,
+                kind: 3,
+                param_a: 0,
+                param_b: 0,
+                hash64: 0,
+            },
+            CircuitTopologyNode {
+                id: 3,
+                parent_id: 2,
+                relation: 0,
+                order: 2,
+                kind: 5,
+                param_a: 6401,
+                param_b: 0,
+                hash64: 0,
+            },
+        ];
+
+        // Independent encoding: write region A and region B separately, each
+        // emitting 3 full node definitions.
+        let mut independent = BitWriter::default();
+        for _ in 0..2 {
+            for n in &nodes_a {
+                n.write_bits(&mut independent);
+            }
+        }
+        let independent_bits = independent.bit_len();
+
+        // Shared encoding: one CircuitBitStream, region B references region A.
+        let mut shared = CircuitBitStream::new();
+        for n in &nodes_a {
+            shared.write_def_or_ref(n); // region A: 3 definitions
+        }
+        for n in &nodes_a {
+            shared.write_def_or_ref(n); // region B: 3 references
+        }
+        let shared_bits = shared.bit_len();
+
+        // Acceptance: shared encoding must be measurably smaller.
+        assert!(
+            shared_bits < independent_bits,
+            "shared {shared_bits} bits must beat independent {independent_bits} bits"
+        );
+
+        // Roundtrip: read back all 6 occurrences, verify equality (ignoring id
+        // and hash64 which are not on the wire).
+        let bytes = shared.into_bytes();
+        let mut reader = CircuitBitStreamReader::new(&bytes);
+        for region in 0..2 {
+            for (idx, expected) in nodes_a.iter().enumerate() {
+                let (_id, got) = reader.read_def_or_ref::<CircuitTopologyNode>().unwrap();
+                assert_eq!(got.relation, expected.relation, "region {region} node {idx} relation");
+                assert_eq!(got.order, expected.order);
+                assert_eq!(got.kind, expected.kind);
+                assert_eq!(got.parent_id, expected.parent_id);
+                assert_eq!(got.param_a, expected.param_a);
+                assert_eq!(got.param_b, expected.param_b);
+            }
         }
     }
 

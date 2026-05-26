@@ -71,10 +71,16 @@ Implemented:
 - exact minimum cover selection with branch-and-bound search
 - don't-care support in minimization
 - hard exact limit: `ZBIT_MAX_INPUTS_EXACT = 16`
+- **hierarchical Shannon-cofactor decomposition** above the 16-input exact bound
+  (ROADMAP IMMED-2): functions over more than 16 inputs split on a chosen variable,
+  recurse on each cofactor, and combine via mux nodes; probe-based essential-input pruning
+  detects variables the function does not actually depend on so e.g. a 32-input stride
+  function with 4 active bits collapses to a small leaf instead of a deep Shannon tree
 
 Code:
 
 - `zbit-rs/src/minimizer.rs`
+- `zbit-rs/src/hierarchical.rs`
 - `zbit-rs/src/model.rs`
 
 ### 2. Canonical structural representation + rewrite-ready flow
@@ -156,13 +162,24 @@ Implemented:
   - `indexed-huffman`
   - `raw-deflate`
   - `raw-zstd`
+  - `raw-xz` / `framed-raw` / `recursive-circuit-xz` / `monotonic-delta` /
+    `adaptive-transformed-xz`
 - rule-based gating for circuit-dictionary evaluation
 - size-based final method choice, never worse than raw baseline by design
 - strict `.zbpk` parser validation
+- **bit-stream interning primitive** (ROADMAP IMMED-1): `CircuitBitStream` writes the
+  first occurrence of any circuit-level definition (transform plan, topology node, etc.)
+  inline and re-references it at `ceil(log2(N))` bits cost; in-tree primitive plus
+  acceptance tests for cross-region sharing (ROADMAP IMMED-3) of distant byte ranges with
+  identical structure
+- **profile-bounded parallelism** (ROADMAP IMMED-5): `rayon::ThreadPoolBuilder::install`
+  wraps the encoder entry points, sized by `CompressionBudgets::max_parallel_codec_threads`
+  (2 for `fast`; unbounded for `balanced`/`deep`/`research`)
 
 Code:
 
 - `zbit-rs/src/pack/`
+- `zbit-rs/src/pack/bitstream.rs`
 - `zbit-rs/src/pack_rules.rs`
 
 ### 7. Streaming compression with multi-level grouping
@@ -211,9 +228,11 @@ Inside `zbit-rs/`:
 - `src/lib.rs`: public API
 - `src/model.rs`: exact Boolean model + `.zbit` serialization
 - `src/minimizer.rs`: exact minimization engine
+- `src/hierarchical.rs`: Shannon-cofactor decomposition above the 16-input exact bound
 - `src/advanced.rs`: heuristic/rewrite/SAT/objective optimization flow
 - `src/sat.rs`: internal SAT solver used by local exactness pruning
 - `src/pack/`: adaptive `.zbpk` + streaming `.zbps` compression/decompression
+- `src/pack/bitstream.rs`: `CircuitBitStream` bit-level interning primitive (ROADMAP IMMED-1)
 - `src/pack_rules.rs`: method-selection rules
 - `src/bin/benchmark_real_file.rs`: real-file benchmark binary
 - `src/bin/benchmark_stream_real_file.rs`: real-file stream benchmark binary

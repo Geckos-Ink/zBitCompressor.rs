@@ -3,6 +3,7 @@
 
 pub mod advanced;
 pub mod error;
+pub mod hierarchical;
 pub mod minimizer;
 pub mod model;
 pub mod pack;

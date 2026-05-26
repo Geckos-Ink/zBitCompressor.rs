@@ -243,28 +243,54 @@ The mistake is treating the CABAC output as the invariant and looking for wins d
 The real opportunity is reducing the number of corrections before CABAC coding, by improving
 the predictor within the decomposition pipeline. Typed substreams (one CABAC instance per
 `CodecCorrection` family) have lower per-family entropy than the mixed stream; CABAC's context
-model adapts faster to a homogeneous token distribution. This is within this codebase's reach
-without upstream preflate-rs changes.
+model adapts faster to a homogeneous token distribution.
 
-**The fix:**
+**Status (2026-05-26): blocked by vendor API surface — needs an upstream patch.** The 2026-05-26
+implementation pass uncovered that the in-tree-only path proposed below is not actually
+reachable without modifying `vendor/preflate-rs`:
 
-1. After `preflate_whole_deflate_stream`, decode `ReconstructionData` with `bitcode::decode`.
-   Then decode the inner `corrections: Vec<u8>` further by running `PredictionDecoderCabac` to
-   recover the raw `CodecCorrection` token stream.
-2. Split tokens into per-family vectors: literal corrections, length corrections, distance
-   corrections, Huffman tree corrections, block boundary corrections.
-3. Re-encode each typed vector with its own CABAC context (or a simpler range coder tuned to
-   the token-type distribution).
-4. Emit the typed substreams through `CircuitBitStream` — each substream is one circuit-level
-   data blob with its own varint length header.
-5. Total bytes across typed substreams must beat the current single mixed stream or the path
-   is rejected. The existing `choose_correction_transform_plan` fallback remains.
+- `ReconstructionData` is declared `struct` (not `pub struct`) in
+  `vendor/preflate-rs/src/stream_processor.rs:32`. Its `read(data) -> Result<Self>` method is
+  similarly private. `bitcode::decode::<ReconstructionData>` cannot be called from outside the
+  crate.
+- Even if `ReconstructionData` were exposed, `PredictionDecoderCabac::decode_correction(action)`
+  needs the caller to supply the next correction *family* (the action) at every step. That
+  ordering is driven by the `token_predictor` / `tree_predictor` replay, not by the byte stream.
+  So "draining tokens from the CABAC stream" requires running the entire recreate pipeline with
+  an instrumented decoder — which means depending on private preflate-rs types
+  (`TokenPredictor`, `DeflateParser`, `PredictionDecoder`).
+- Re-encoding into typed substreams loses the per-token *interleaving order* the recreate
+  consumer expects; the consumer would need to be modified to read from typed substreams as the
+  predictor demands each next family.
 
-**Acceptance criteria:**
+**The fix (revised path):**
+
+1. **Upstream patch (vendor/preflate-rs)**: expose `ReconstructionData` (and its `read` method),
+   `PredictionDecoder`, and an instrumented-decoder hook that the recreate pipeline calls
+   through. Alternatively, add a public `recreate_with_typed_corrections(plaintext, parameters,
+   per_family_substreams)` entry point.
+2. **In-tree (zbit-rs)**: once the upstream API exists, drive the recreate pipeline with an
+   instrumented decoder that records every `(family, value)` pair; split into per-family
+   vectors; re-encode each with its own CABAC context; emit via `CircuitBitStream` (the
+   IMMED-1 primitive already supports per-family typed sub-streams via separate
+   `CircuitBitStream` instances or `BitSerializable`-typed entries).
+3. **Decode**: the patched preflate-rs `recreate_with_typed_corrections` consumes the typed
+   substreams in the order the predictor demands.
+4. **Cost gate**: keep the existing `choose_correction_transform_plan` fallback so the typed
+   path is selected only when it beats the current mixed-stream baseline.
+
+**Acceptance criteria (unchanged):**
 - Correction stream bytes for cat corpus drop measurably below the current 284 KB baseline.
 - Roundtrip validation passes (corrections still reconstruct the original DEFLATE stream).
 - Per-family CABAC model shows lower cross-entropy on held-out data than the mixed model.
 - If typed encoding does not win on a given input, fallback to single-stream path is automatic.
+
+**Why no work landed this session**: the upstream patch is a real change to a third-party
+crate (Microsoft preflate-rs vendored under Apache-2.0). Doing it correctly requires
+PR-quality changes with their own tests and an interface stable enough that future preflate-rs
+updates won't break the typed path. That's a focused session of its own, not a "while I'm here"
+addition to a different roadmap item. The existing N2 section above already documents this
+upstream-coordination requirement; IMMED-4 here is now consistent with that finding.
 
 ### IMMED-5. Compression Throughput: Complete the Parallelism, Don't Gate Behind Profiles
 

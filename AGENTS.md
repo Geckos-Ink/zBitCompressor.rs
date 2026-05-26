@@ -13,6 +13,62 @@
 - License file: `LICENSE`
 
 ## Recent Updates
+- 2026-05-26: Implemented IMMED-5 (parallelism) + IMMED-1 (`CircuitBitStream` primitive) +
+  IMMED-2 (hierarchical Boolean decomposition above 16 inputs) + IMMED-3 acceptance test
+  layer; documented IMMED-4 vendor-API blocker. All 42 lib tests PASS; smoke roundtrip on
+  paper corpus PASS (`raw-xz` selected, ratio `0.331549`, validation PASS).
+
+  Files added or modified:
+  - **`zbit-rs/src/pack/bitstream.rs` (new)** — `CircuitBitStream` + `CircuitBitStreamReader`
+    + `BitSerializable` trait. Definition tag = 0 + inline content; reference tag = 1 +
+    `ceil(log2(N))` bits. Reader snapshots bit-ranges into the source buffer so refs replay
+    exact wire bits (T does not need `Clone`). Includes `BitSerializable` impls for the live
+    `CircuitTransformPlan` and `CircuitTopologyNode` types so future format migration is
+    drop-in. 8 tests covering all ROADMAP IMMED-1/3 acceptance criteria.
+  - **`zbit-rs/src/pack/mod.rs`** — `include!("bitstream.rs")` added.
+  - **`zbit-rs/src/pack/core.rs`** — `CompressionBudgets` struct with `max_parallel_codec_threads`
+    field; threaded into `compress_adaptive_to_bytes`/`compress_stream_to_bytes` via
+    `rayon::ThreadPoolBuilder::install` at the top of each entry point. `total_compression_ms`
+    and `compression_throughput_mib_s` added to `CandidateTimingStats` and reported on every
+    `PackStats`/`StreamPackStats`.
+  - **`zbit-rs/src/pack/stream.rs`** — same wrapper pattern for the stream entry point;
+    `stream_finalize_timings` helper centralises the wall-clock-to-MiB/s conversion.
+  - **`zbit-rs/src/pack/recursive.rs`** — migration pointer comment above the multi-block
+    trailer documenting the v4 bump shape (replace hand-rolled per-section bit writers with
+    `CircuitBitStream::write_def_or_ref::<CircuitTransformPlan>` calls).
+  - **`zbit-rs/src/hierarchical.rs` (new)** — Shannon cofactor decomposition above the
+    `LEAF_BUDGET = 16` exact-minimizer bound. `FunctionDescription` trait (callable, so the
+    function can describe arbitrary `n ≤ 64` inputs without paying `2^n` upfront).
+    `decompose(&f, splitting_order)` returns a `HierarchicalCircuit` tree of `Leaf` / `Mux` /
+    `Const` nodes. Probe-based essential-input pruning (`probe_essential_inputs`) detects
+    variables the function does not depend on so a 32-input function with 4 active inputs
+    decomposes to a few small leaves instead of 2^16 redundant ones. 5 tests including the
+    ROADMAP-2 32-input periodic-stride acceptance.
+  - **`zbit-rs/src/lib.rs`** — `pub mod hierarchical;` added.
+  - **`ROADMAP.md`** — IMMED-4 section rewritten with the concrete vendor-API blocker
+    (lines 237-285): `ReconstructionData` is private in preflate-rs, `PredictionDecoder`
+    ordering is driven by token_predictor replay not by the byte stream, typed-substream
+    re-encoding loses the interleaving order the recreate consumer expects. Revised fix
+    plan requires an upstream patch first.
+
+  **Status of IMMED items (`ROADMAP.md` lines 75-312):**
+  - IMMED-5 (parallelism) — **landed**. Most par_iter sites were already in place;
+    `CompressionBudgets` and `compression_throughput_mib_s` are new.
+  - IMMED-1 (`CircuitBitStream`) — **landed at the primitive + integration-test layer**.
+    Live format migration (replacing the v3 compact-topology section with `CircuitBitStream`)
+    documented as a v4 bump in `recursive.rs` and left for a focused next session.
+  - IMMED-2 (hierarchical decomposition) — **landed**. BDD intermediate (`10 < n ≤ 24`)
+    deferred per the ROADMAP decision-table comment in source; the Shannon path covers the
+    32-input ROADMAP-2 acceptance.
+  - IMMED-3 (cross-region sharing) — **acceptance test layer landed** in
+    `immed_3_distant_regions_share_topology`. The ROADMAP says IMMED-3 "is the consequence of
+    IMMED-1 and IMMED-2"; the end-to-end win awaits the Phase-2 cross-region encoder that
+    actually emits multi-region transforms.
+  - IMMED-4 (typed CABAC correction substreams) — **blocked on vendor patch**, see ROADMAP
+    update above.
+
+  Tracked benchmark ratios are unchanged (no format changes shipped this session). Memory
+  index updated in `~/.claude/projects/.../memory/MEMORY.md` with `project_immed_status.md`.
 - 2026-05-23: Two real structural changes on top of the v3 dictionary compaction.
   1. **Multi-block plan dictionary** (`zbit-rs/src/pack/recursive.rs`). The first
      concrete "classic dictionary compression through repeated circuits" step. The
