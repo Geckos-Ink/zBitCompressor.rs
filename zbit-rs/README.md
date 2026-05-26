@@ -12,7 +12,7 @@ Rust migration of the `zBit` compression model with:
 - technology-aware objective mapping (ASIC area/delay and FPGA LUT4/LUT6 proxies)
 - canonical DAG interning for gates
 - model serialization/deserialization (`.zbit`)
-- adaptive pack strategy (`raw-copy`, `indexed-raw`, `indexed-circuit`, `indexed-huffman`, `raw-deflate`, `raw-zstd`, `framed-raw`, `recursive-circuit-xz`, `monotonic-delta`)
+- adaptive pack strategy (`raw-copy`, `indexed-raw`, `indexed-circuit`, `indexed-huffman`, `raw-deflate`, `raw-zstd`, `raw-xz`, `raw-brotli`, `framed-raw`, `recursive-circuit-xz`, `monotonic-delta`, `adaptive-transformed-xz`)
 - real-file benchmark/report generation
 
 ## Build and Test

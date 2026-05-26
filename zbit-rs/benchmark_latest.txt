@@ -1,11 +1,11 @@
 zBit-rs Real File Benchmark Report
-Generated: 2026-05-23 22:44:56
+Generated: 2026-05-26 01:22:00
 Input file: papers/zbit-algorithmsResearch.md
-Compressed artifact: /tmp/paper.zbpk
+Compressed artifact: zbit-rs/benchmark_algorithmsResearch.zbpk
 
 Active profile: balanced
-Selected method: raw-xz
-Selection reason: raw-xz improves size: 62044 -> 20573 bytes
+Selected method: raw-brotli
+Selection reason: raw-brotli improves size: 62044 -> 18585 bytes
 Circuit evaluation rule: symbol width <= 8 bits: raw dictionary is denser than circuit descriptors
 
 Skipped candidates:
@@ -19,6 +19,7 @@ Indexed-circuit candidate size (bytes): skipped by rules
 Indexed-huffman candidate size (bytes): 37549
 Raw-deflate candidate size (bytes): 22061
 Raw-zstd candidate size (bytes): 20965
+Raw-brotli candidate size (bytes): 18585
 Raw-xz candidate size (bytes): 20573
 Framed-raw candidate size (bytes): unavailable
 Recursive-circuit-xz candidate size (bytes): unavailable
@@ -26,22 +27,23 @@ Monotonic-delta candidate size (bytes): unavailable
 Adaptive-transformed-xz candidate size (bytes): unavailable
 
 Original size (bytes): 62015
-Compressed size (bytes): 20561
-Compression ratio (compressed/original): 0.331549
-Space savings (%): 66.85
+Compressed size (bytes): 18573
+Compression ratio (compressed/original): 0.299492
+Space savings (%): 70.05
 
-Compression time (ms): 76.060
-Decompression time (ms): 2.532
-Compression throughput (MiB/s): 0.778
-Decompression throughput (MiB/s): 23.355
+Compression time (ms): 820.075
+Decompression time (ms): 8.575
+Compression throughput (MiB/s): 0.072
+Decompression throughput (MiB/s): 6.897
 
 Candidate timing breakdown (ms):
-- index stream build: 0.941
-- huffman stream build: 1.412
-- raw-deflate encode: 3.614
-- raw-zstd encode: 27.737
-- raw-xz encode: 41.559
-- framed extraction: 0.146
+- index stream build: 10.816
+- huffman stream build: 7.336
+- raw-deflate encode: 11.290
+- raw-zstd encode: 64.685
+- raw-brotli gate/encode: 623.604
+- raw-xz encode: 100.553
+- framed extraction: 1.346
 - recursive preflate search: 0.000
 - recursive transform sampling: 0.000
 - recursive transform evaluation: 0.000
@@ -68,6 +70,6 @@ Bits per symbol index: 0
 Raw dictionary bytes: 114
 Circuit dictionary bytes: 0
 Huffman dictionary bytes: 0
-Packed index payload bytes: 20544
+Packed index payload bytes: 18556
 
 Output validation: PASS

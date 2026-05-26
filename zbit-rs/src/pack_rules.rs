@@ -13,6 +13,9 @@ pub enum PackMethod {
     RecursiveCircuitXz,
     MonotonicDelta,
     RawXz,
+    // Raw Brotli candidate for text-heavy payloads where LZMA2 is not the best entropy
+    // model. It has no dictionary: the ZBPK payload is the Brotli stream.
+    RawBrotli,
     // Adaptive reversible transform applied to the raw input followed by a codec encode.
     // Generalises the transform machinery (previously gated behind framed-deflate detection)
     // to inputs that are not framed deflate — e.g. PyTorch model weights, raw float tensors,
@@ -35,7 +38,8 @@ impl PackMethod {
             Self::RecursiveCircuitXz => 7,
             Self::MonotonicDelta => 8,
             Self::RawXz => 9,
-            Self::AdaptiveTransformedXz => 10,
+            Self::RawBrotli => 10,
+            Self::AdaptiveTransformedXz => 11,
         }
     }
 
@@ -51,7 +55,8 @@ impl PackMethod {
             7 => Some(Self::RecursiveCircuitXz),
             8 => Some(Self::MonotonicDelta),
             9 => Some(Self::RawXz),
-            10 => Some(Self::AdaptiveTransformedXz),
+            10 => Some(Self::RawBrotli),
+            11 => Some(Self::AdaptiveTransformedXz),
             _ => None,
         }
     }
@@ -68,6 +73,7 @@ impl PackMethod {
             Self::RecursiveCircuitXz => "recursive-circuit-xz",
             Self::MonotonicDelta => "monotonic-delta",
             Self::RawXz => "raw-xz",
+            Self::RawBrotli => "raw-brotli",
             Self::AdaptiveTransformedXz => "adaptive-transformed-xz",
         }
     }
@@ -88,6 +94,7 @@ pub struct PackEvaluation {
     pub raw_deflate_total_bytes: Option<usize>,
     pub raw_zstd_total_bytes: Option<usize>,
     pub raw_xz_total_bytes: Option<usize>,
+    pub raw_brotli_total_bytes: Option<usize>,
     pub framed_raw_total_bytes: Option<usize>,
     pub recursive_circuit_xz_total_bytes: Option<usize>,
     pub monotonic_delta_total_bytes: Option<usize>,
@@ -111,6 +118,7 @@ impl PackEvaluation {
             raw_deflate_total_bytes: None,
             raw_zstd_total_bytes: None,
             raw_xz_total_bytes: None,
+            raw_brotli_total_bytes: None,
             framed_raw_total_bytes: None,
             recursive_circuit_xz_total_bytes: None,
             monotonic_delta_total_bytes: None,
@@ -222,6 +230,17 @@ pub fn choose_best_method(eval: &mut PackEvaluation) {
             best_reason = format!(
                 "raw-xz improves size: {} -> {} bytes",
                 eval.raw_total_bytes, xz_size
+            );
+        }
+    }
+
+    if let Some(brotli_size) = eval.raw_brotli_total_bytes {
+        if brotli_size < best_size {
+            best_method = PackMethod::RawBrotli;
+            best_size = brotli_size;
+            best_reason = format!(
+                "raw-brotli improves size: {} -> {} bytes",
+                eval.raw_total_bytes, brotli_size
             );
         }
     }

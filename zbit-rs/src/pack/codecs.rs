@@ -62,6 +62,45 @@ fn decode_raw_zstd_payload(payload: &[u8], original_size: usize) -> ZbitResult<V
     Ok(out)
 }
 
+fn build_raw_brotli_payload(input: &[u8]) -> ZbitResult<Vec<u8>> {
+    let mut encoder = brotli::CompressorReader::new(Cursor::new(input), 64 * 1024, 11, 22);
+    let mut out = Vec::new();
+    encoder
+        .read_to_end(&mut out)
+        .map_err(|e| ZbitError::Io(format!("brotli encode failed: {e}")))?;
+    Ok(out)
+}
+
+fn decode_raw_brotli_payload(payload: &[u8], original_size: usize) -> ZbitResult<Vec<u8>> {
+    let mut decoder = brotli::Decompressor::new(Cursor::new(payload), 64 * 1024);
+    let mut out = Vec::with_capacity(original_size.min(1 << 20));
+    let mut buf = [0u8; 8192];
+
+    loop {
+        let read = decoder
+            .read(&mut buf)
+            .map_err(|e| ZbitError::Parse(format!("brotli decode failed: {e}")))?;
+        if read == 0 {
+            break;
+        }
+        if out.len().saturating_add(read) > original_size {
+            return Err(ZbitError::Parse(format!(
+                "raw-brotli output exceeds expected length {original_size}"
+            )));
+        }
+        out.extend_from_slice(&buf[..read]);
+    }
+
+    if out.len() != original_size {
+        return Err(ZbitError::Parse(format!(
+            "raw-brotli output length mismatch: expected {original_size} got {}",
+            out.len()
+        )));
+    }
+
+    Ok(out)
+}
+
 fn build_raw_xz_payload(
     input: &[u8],
     context: &mut CompressionContext,

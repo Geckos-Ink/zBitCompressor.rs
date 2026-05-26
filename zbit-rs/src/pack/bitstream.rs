@@ -203,16 +203,16 @@ impl<'a> CircuitBitStreamReader<'a> {
 
 // ============================================================================
 // IMMED-1.2 wiring: BitSerializable impls for the production types that will
-// eventually share a single CircuitBitStream when the format is bumped to v4.
+// eventually share a single CircuitBitStream when the topology format is bumped again.
 //
-// These are NOT yet used in the live encoder — `recursive.rs` still ships v3
+// These are NOT yet used in the live encoder — `recursive.rs` still ships the v3/v4
 // dictionaries with the existing compact_topology / multi-block trailer
 // layouts. They exist so:
 //   (a) The acceptance test for cross-region sharing can run against the real
 //       data types (see immed_1_real_types_share_via_bitstream below).
 //   (b) The migration path is concrete: the next session can replace the
 //       hand-rolled per-section bit writers with `CircuitBitStream::write_def_or_ref`
-//       calls that use these impls, then bump ZBPK_VERSION to 4.
+//       calls that use these impls, then bump ZBPK_VERSION again.
 //
 // The encoding mirrors the current compact-topology / multi-block-plan
 // formats so existing files can be re-emitted under the new framing without

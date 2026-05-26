@@ -23,7 +23,7 @@ use xz2::write::XzEncoder as XzWriterEncoder;
 use zstd::stream as zstd_stream;
 
 pub const ZBPK_MAGIC: u32 = 0x5A42_504B; // "ZBPK"
-pub const ZBPK_VERSION: u16 = 3;
+pub const ZBPK_VERSION: u16 = 4;
 // Upper bound used for candidate-size estimation. The actual header is variable-length:
 //   magic u32 (4) + version u16 (2) + flags u16 (2) + packed method-and-bits u8 (1)
 //   + varint unique_count + varint original_size + varint dict_size + varint payload_size.
@@ -212,12 +212,34 @@ impl CompressionBudgets {
     }
 }
 
+fn should_evaluate_raw_brotli(input: &[u8]) -> bool {
+    if input.is_empty() || input.len() > 8 * 1024 * 1024 {
+        return false;
+    }
+    if std::str::from_utf8(input).is_ok() {
+        return true;
+    }
+
+    let ascii_text_bytes = input
+        .iter()
+        .filter(|&&byte| matches!(byte, b'\n' | b'\r' | b'\t' | 0x20..=0x7e))
+        .count();
+    let control_bytes = input
+        .iter()
+        .filter(|&&byte| byte < 0x20 && !matches!(byte, b'\n' | b'\r' | b'\t'))
+        .count();
+
+    ascii_text_bytes.saturating_mul(100) >= input.len().saturating_mul(90)
+        && control_bytes.saturating_mul(100) <= input.len()
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CandidateTimingStats {
     pub index_stream_ms: f64,
     pub huffman_stream_ms: f64,
     pub raw_deflate_ms: f64,
     pub raw_zstd_ms: f64,
+    pub raw_brotli_ms: f64,
     pub raw_xz_ms: f64,
     pub framed_extraction_ms: f64,
     pub recursive_preflate_ms: f64,
@@ -265,6 +287,7 @@ pub struct PackStats {
     pub indexed_huffman_candidate_bytes: Option<usize>,
     pub raw_deflate_candidate_bytes: Option<usize>,
     pub raw_zstd_candidate_bytes: Option<usize>,
+    pub raw_brotli_candidate_bytes: Option<usize>,
     pub raw_xz_candidate_bytes: Option<usize>,
     pub framed_raw_candidate_bytes: Option<usize>,
     pub recursive_circuit_xz_candidate_bytes: Option<usize>,
@@ -1241,6 +1264,7 @@ fn write_pack_bytes(
     huffman_stream: Option<&HuffmanStream>,
     raw_deflate_payload: Option<&[u8]>,
     raw_zstd_payload: Option<&[u8]>,
+    raw_brotli_payload: Option<&[u8]>,
     raw_xz_payload: Option<&[u8]>,
     framed_run: Option<&FramedPayloadRun>,
     recursive_stream: Option<&RecursiveCircuitStream>,
@@ -1289,6 +1313,14 @@ fn write_pack_bytes(
         PackMethod::RawZstd => {
             let payload = raw_zstd_payload.ok_or_else(|| {
                 ZbitError::Internal("raw-zstd payload missing for raw-zstd method".to_string())
+            })?;
+            (0u8, 0usize, 0usize, payload.len())
+        }
+        PackMethod::RawBrotli => {
+            let payload = raw_brotli_payload.ok_or_else(|| {
+                ZbitError::Internal(
+                    "raw-brotli payload missing for raw-brotli method".to_string(),
+                )
             })?;
             (0u8, 0usize, 0usize, payload.len())
         }
@@ -1348,7 +1380,7 @@ fn write_pack_bytes(
 
     let mut out = Vec::with_capacity(ZBPK_HEADER_BYTES + dict_size + payload_size);
 
-    // v3 header layout (everything is principled by-bit / by-varint):
+    // v4 header layout (same packed fields as v3; v4 adds a raw-brotli method slot):
     //   magic u32        — wire-stable
     //   version u16      — wire-stable
     //   flags u16        — reserved, MUST be 0
@@ -1421,7 +1453,10 @@ fn write_pack_bytes(
                 out.push(len);
             }
         }
-        PackMethod::RawDeflate | PackMethod::RawZstd | PackMethod::RawXz => {}
+        PackMethod::RawDeflate
+        | PackMethod::RawZstd
+        | PackMethod::RawBrotli
+        | PackMethod::RawXz => {}
         PackMethod::FramedRaw => {
             let run = framed_run.ok_or_else(|| {
                 ZbitError::Internal("framed-run missing for framed-raw dictionary".to_string())
@@ -1479,6 +1514,14 @@ fn write_pack_bytes(
         PackMethod::RawZstd => {
             let payload = raw_zstd_payload.ok_or_else(|| {
                 ZbitError::Internal("raw-zstd payload missing for raw-zstd method".to_string())
+            })?;
+            out.extend_from_slice(&payload);
+        }
+        PackMethod::RawBrotli => {
+            let payload = raw_brotli_payload.ok_or_else(|| {
+                ZbitError::Internal(
+                    "raw-brotli payload missing for raw-brotli method".to_string(),
+                )
             })?;
             out.extend_from_slice(&payload);
         }
@@ -1571,6 +1614,18 @@ fn compress_adaptive_to_bytes_inner(
     context.timings.raw_zstd_ms = raw_zstd_timer.elapsed().as_secs_f64() * 1000.0;
     let raw_zstd_candidate_bytes = Some(ZBPK_HEADER_BYTES + raw_zstd_payload.len());
 
+    let raw_brotli_timer = Instant::now();
+    let raw_brotli_payload = if should_evaluate_raw_brotli(input) {
+        Some(build_raw_brotli_payload(input)?)
+    } else {
+        context.push_skipped("raw-brotli skipped: bounded text-likeness gate did not pass");
+        None
+    };
+    context.timings.raw_brotli_ms = raw_brotli_timer.elapsed().as_secs_f64() * 1000.0;
+    let raw_brotli_candidate_bytes = raw_brotli_payload
+        .as_ref()
+        .map(|payload| ZBPK_HEADER_BYTES + payload.len());
+
     // First a cheap raw-xz estimate (preset 3, no tuning matrix). Used as a gate for the
     // adaptive-transformed-xz path AND, more importantly, as a fast way to decide whether
     // running the full raw-xz tuning matrix is worth it. On a 95 MiB PyTorch model the
@@ -1649,6 +1704,7 @@ fn compress_adaptive_to_bytes_inner(
     eval.indexed_huffman_total_bytes = indexed_huffman_candidate_bytes;
     eval.raw_deflate_total_bytes = raw_deflate_candidate_bytes;
     eval.raw_zstd_total_bytes = raw_zstd_candidate_bytes;
+    eval.raw_brotli_total_bytes = raw_brotli_candidate_bytes;
     eval.raw_xz_total_bytes = raw_xz_candidate_bytes;
     eval.framed_raw_total_bytes = framed_raw_candidate_bytes;
     eval.recursive_circuit_xz_total_bytes = recursive_circuit_xz_candidate_bytes;
@@ -1681,6 +1737,7 @@ fn compress_adaptive_to_bytes_inner(
         huffman_stream.as_ref(),
         Some(raw_deflate_payload.as_slice()),
         Some(raw_zstd_payload.as_slice()),
+        raw_brotli_payload.as_deref(),
         Some(raw_xz_payload.as_slice()),
         framed_run.as_ref(),
         recursive_stream.as_ref(),
@@ -1701,6 +1758,12 @@ fn compress_adaptive_to_bytes_inner(
         }
         PackMethod::RawDeflate => (0u8, raw_deflate_payload.len(), 0usize),
         PackMethod::RawZstd => (0u8, raw_zstd_payload.len(), 0usize),
+        PackMethod::RawBrotli => {
+            let payload = raw_brotli_payload.as_ref().ok_or_else(|| {
+                ZbitError::Internal("raw-brotli selected without raw-brotli payload".to_string())
+            })?;
+            (0u8, payload.len(), 0usize)
+        }
         PackMethod::RawXz => (0u8, raw_xz_payload.len(), 0usize),
         PackMethod::FramedRaw => {
             let run = framed_run.as_ref().ok_or_else(|| {
@@ -1763,6 +1826,7 @@ fn compress_adaptive_to_bytes_inner(
         indexed_huffman_candidate_bytes,
         raw_deflate_candidate_bytes,
         raw_zstd_candidate_bytes,
+        raw_brotli_candidate_bytes,
         raw_xz_candidate_bytes,
         framed_raw_candidate_bytes,
         recursive_circuit_xz_candidate_bytes,
@@ -1906,6 +1970,15 @@ fn decompress_pack_bytes(bytes: &[u8]) -> ZbitResult<Vec<u8>> {
             }
             return decode_raw_zstd_payload(payload, original_size);
         }
+        PackMethod::RawBrotli => {
+            if bits_per_symbol != 0 || unique_count != 0 || dict_size != 0 {
+                return Err(ZbitError::Parse(
+                    "raw-brotli requires bits_per_symbol=0, unique_count=0, dict_size=0"
+                        .to_string(),
+                ));
+            }
+            return decode_raw_brotli_payload(payload, original_size);
+        }
         PackMethod::RawXz => {
             if bits_per_symbol != 0 || unique_count != 0 || dict_size != 0 {
                 return Err(ZbitError::Parse(
@@ -1974,6 +2047,7 @@ fn decompress_pack_bytes(bytes: &[u8]) -> ZbitResult<Vec<u8>> {
         | PackMethod::IndexedHuffman
         | PackMethod::RawDeflate
         | PackMethod::RawZstd
+        | PackMethod::RawBrotli
         | PackMethod::RawXz
         | PackMethod::FramedRaw
         | PackMethod::RecursiveCircuitXz

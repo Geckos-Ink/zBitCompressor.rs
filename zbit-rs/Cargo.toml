@@ -20,6 +20,7 @@ name = "zbit-benchmark-stream"
 path = "src/bin/benchmark_stream_real_file.rs"
 
 [dependencies]
+brotli = "8"
 flate2 = "1.1"
 zstd = "0.13"
 crc32fast = "1.5"

@@ -162,7 +162,7 @@ Implemented:
   - `indexed-huffman`
   - `raw-deflate`
   - `raw-zstd`
-  - `raw-xz` / `framed-raw` / `recursive-circuit-xz` / `monotonic-delta` /
+  - `raw-xz` / `raw-brotli` / `framed-raw` / `recursive-circuit-xz` / `monotonic-delta` /
     `adaptive-transformed-xz`
 - rule-based gating for circuit-dictionary evaluation
 - size-based final method choice, never worse than raw baseline by design
@@ -297,19 +297,21 @@ bash zbit-rs/scripts/benchmark_cat_challenge_stream_multilevel.sh
 
 ## Latest Benchmark Result Files
 
-Current snapshot (reports generated on 2026-05-23):
+Current snapshot (short reports refreshed on 2026-05-26; long cat/depth reports kept from 2026-05-23):
 
 ### Latest Single-Run Benchmarks
 
 | Test | Input | Selected method/profile | Original -> Compressed (bytes) | Ratio | Savings | Compression ms | Decompression ms | Validation |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Paper benchmark | `papers/zbit-algorithmsResearch.md` | `raw-xz` | `62015 -> 20561` | `0.331549` | `66.85%` | `70.821` | `0.832` | `PASS` |
-| Primary binary benchmark | `assets/primary.3b.bin` | `monotonic-delta` | `3233613 -> 562799` | `0.174046` | `82.60%` | `5307.513` | `18.937` | `PASS` |
+| Paper benchmark | `papers/zbit-algorithmsResearch.md` | `raw-brotli` | `62015 -> 18573` | `0.299492` | `70.05%` | `820.075` | `8.575` | `PASS` |
+| Primary binary benchmark | `assets/primary.3b.bin` | `monotonic-delta` | `3233613 -> 562799` | `0.174046` | `82.60%` | `9803.097` | `133.500` | `PASS` |
 | Cat challenge benchmark | `assets/cat_challenge.png` | `recursive-circuit-xz` | `2969404 -> 2670571` | `0.899363` | `10.07%` | `58945.348` | `481.421` | `PASS` |
 | Cat challenge stream benchmark | `assets/cat_challenge.png` | `wide-overfit stream` | `2969404 -> 2670846` | `0.899455` | `10.05%` | `112964.407` | `8186.741` | `PASS` |
 | Depth Anything model benchmark | `assets/depth_anything_v2_vits.pth` | `adaptive-transformed-xz` | `99218434 -> 83380762` | `0.840376` | `15.96%` | `628278.163` | `236.317` | `PASS` |
 
-Compression times are substantially lower than the 2026-05-07 snapshot: paper `313 ms -> 75 ms` (~4.2x faster), primary `16 635 ms -> 5 507 ms` (~3.0x faster), cat `112 500 ms -> 60 747 ms` (~1.9x faster), and the new depth_anything model corpus `5 429 743 ms -> 628 278 ms` (~**8.6x faster** — biggest wins from bounding the false-positive CRC32 frame scan and skipping the full raw-xz tuning matrix when adaptive-transformed-xz clearly wins). Cat ratio improved slightly (`0.899412 -> 0.899361`, 151 bytes saved cumulatively across the v3 dictionary compaction); all other corpus ratios held byte-identical. The improvements come from (a) a cheap XZ-3 ranking pass before the expensive `choose_best_codec` evaluation, (b) a leaner per-plan winner-refinement tuning matrix, (c) a bounded framed-payload analyzer, (d) a tuned-XZ cache, and (e) a runtime gate that skips the full raw-xz tuning matrix when a cheap XZ-3 estimate plus adaptive-transformed-xz prove raw-xz cannot win.
+`raw-brotli` is now available for bounded text-like inputs and moves the paper benchmark from `20561` bytes (`raw-xz`, ratio `0.331549`) to `18573` bytes (ratio `0.299492`). The candidate is gated by a cheap text-likeness check so binary corpora such as `primary.3b`, cat, and depth_anything do not pay the q11 Brotli search cost. Outer recompression of `.zbpk` artifacts was also probed: it lost on paper/primary and saved only 58 bytes on the 83 MB depth artifact with zstd, so it is documented but not promoted into the live format yet.
+
+Compression times remain substantially lower than the 2026-05-07 snapshot on the structural paths: primary `16 635 ms -> 9 803 ms`, cat `112 500 ms -> 60 747 ms`, and depth_anything `5 429 743 ms -> 628 278 ms`. Cat ratio improved slightly (`0.899412 -> 0.899361`, 151 bytes saved cumulatively across the v3 dictionary compaction). The structural-speed improvements come from (a) a cheap XZ-3 ranking pass before the expensive `choose_best_codec` evaluation, (b) a leaner per-plan winner-refinement tuning matrix, (c) a bounded framed-payload analyzer, (d) a tuned-XZ cache, and (e) a runtime gate that skips the full raw-xz tuning matrix when a cheap XZ-3 estimate plus adaptive-transformed-xz prove raw-xz cannot win.
 
 Several new tail-only reversible transforms have been added without changing tracked ratios: `periodic-head-tail-tail-row-delta` / `row-xor` / `row-up` (PNG-style Sub / XOR / Up predictors applied only to the row-data tail), `periodic-head-tail-tail-bit-plane-transpose` (with and without follow-up unary delta), plus deep-search XZ tunings (`depth=2000`/`4000`) gated to the deep / research profiles. They lose the XZ-3 ranking on the already-filtered cat PNG IDAT plain (where the simple `periodic-head-tail` still wins by ~23 KB on XZ-9) but stay available for unfiltered raster payloads where they should win cleanly.
 
@@ -317,9 +319,9 @@ The N3 multi-block recursive-circuit path is also landed (deep/research only): t
 
 A new top-level pack method `adaptive-transformed-xz` brings the same reversible-transform search to inputs that are *not* framed deflate (e.g. PyTorch `.pth` model files, raw float-tensor dumps). It runs `choose_adaptive_transform_plan` on the raw input, encodes the best transformed payload with the full codec/tuned-XZ selection, and stores a small 18-byte dictionary `(transform_kind, period, head, codec, plain_len)` so the decoder can invert the transform deterministically. Two cost gates keep it bounded: skip when recursive-circuit-xz already covers the same search; skip when raw-xz already compresses to ≤ 0.30 of the input (already-strong corpora like `primary.3b.bin`). A 128 KiB size threshold keeps small text files out of the plan search. On the new `depth_anything_v2_vits.pth` corpus it wins by **~7 MB (~7.8 %)** vs raw-xz alone: raw-xz `90 414 940 → 83 380 790` adaptive-transformed-xz, final ratio `0.840376` on 99 218 434 input bytes.
 
-### ZBPK v3: bit-wise / enum-cut-out across every dictionary
+### ZBPK v4: bit-wise dictionaries plus text-codec method slot
 
-The on-disk format is now **ZBPK v3**. Every dictionary section was rebuilt under the same rule the topology bit-packing introduced: spend only the bits each enumeration value or magnitude actually needs, never a whole byte for a single bit of state. The previous round had compacted only the topology nodes; v3 closes the gap so no field of any pack method wastes bits on combinations that never occur:
+The on-disk format is now **ZBPK v4**. v3 rebuilt every dictionary section under the same rule the topology bit-packing introduced: spend only the bits each enumeration value or magnitude actually needs, never a whole byte for a single bit of state. v4 keeps that layout and uses another reserved 4-bit method slot for `raw-brotli`, a no-dictionary payload method for text-heavy inputs:
 
 - **ZBPK header.** `method` (≤ 16 values) and `bits_per_symbol` (0..=15) are packed into one byte (4 bits each). `unique_count`, `original_size`, `dict_size`, and `payload_size` are varints instead of fixed `u16`/`u64`. The header on a 62 KB text file shrinks from 36 B to **17 B**.
 - **Framed-payload dictionary.** The six u32 size fields (prefix_len, suffix_len, base_chunk_len, full_chunk_count, tail_chunk_len, total_chunks) are varints; the fixed section drops from 28 B to ~12 B.
@@ -327,6 +329,7 @@ The on-disk format is now **ZBPK v3**. Every dictionary section was rebuilt unde
 - **Multi-block plan trailer.** `block_count`, `block_size`, and each plan's `period`/`head` are varints; the plan's kind index is one byte (6 bits used). Per-plan slot goes from 9 B to 3-5 B.
 - **Adaptive-transformed-xz dictionary.** One packed byte `(codec:2 | kind_index:6)` plus varint `period`/`head`/`plain_len`. Drops from 18 B to ~9 B.
 - **Monotonic-delta dictionary.** One packed byte `(width-1:3 | mode:3 | codec:2)`, then `trailing_zero_shift` (6 bits used out of its byte), then varint `count`/`first_value`/`transformed_plain_len`. Drops from 28 B to ~12 B.
+- **Raw-brotli payload.** No dictionary; the payload is a Brotli q11 stream. It is evaluated only for bounded text-like inputs and selected only when it beats the other total packed sizes.
 
 All five share the **same** dense `kind_to_compact_index` table the topology bit-packing introduced, so the 49 distinct `CircuitTransformKind`-derived values fit in exactly 6 bits everywhere they appear. Measured wins on the existing corpus (all `PASS`):
 
@@ -417,9 +420,9 @@ assert_eq!(stream_output, input);
 ### `.zbpk` pack
 
 - magic: `ZBPK` (`0x5A42_504B`)
-- version: `2`
-- 36-byte fixed header + dictionary + payload
-- adaptive methods include `raw-copy`, `indexed-raw`, `indexed-circuit`, `indexed-huffman`, `raw-deflate`, `raw-zstd`, `raw-xz`, `framed-raw`, `recursive-circuit-xz`, and `monotonic-delta`
+- version: `4`
+- variable header + dictionary + payload
+- adaptive methods include `raw-copy`, `indexed-raw`, `indexed-circuit`, `indexed-huffman`, `raw-deflate`, `raw-zstd`, `raw-xz`, `raw-brotli`, `framed-raw`, `recursive-circuit-xz`, `monotonic-delta`, and `adaptive-transformed-xz`
 - method selection is cost-based: circuit/structural candidates are accepted only when they beat safer raw or codec-backed candidates
 
 ### `.zbps` stream pack

@@ -191,10 +191,35 @@ mod tests {
             matches!(
                 stats.chosen_method,
                 PackMethod::RawDeflate | PackMethod::RawZstd | PackMethod::RawXz
+                    | PackMethod::RawBrotli
             ),
             "expected a strong raw compressor, got {:?}",
             stats.chosen_method
         );
+    }
+
+    #[test]
+    fn adaptive_pack_can_choose_raw_brotli_and_roundtrip() {
+        let input = include_bytes!("../../../papers/zbit-algorithmsResearch.md");
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("zbit_pack_brotli_{stamp}.zbpk"));
+
+        let stats = compress_adaptive_to_file(input, &path).expect("compress adaptive");
+        let output = decompress_file(&path).expect("decompress adaptive");
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(output, input);
+        assert!(
+            matches!(stats.chosen_method, PackMethod::RawBrotli),
+            "expected raw-brotli to be chosen for markdown corpus, got {:?}",
+            stats.chosen_method
+        );
+        assert!(stats.raw_brotli_candidate_bytes.is_some());
+        assert!(stats.compressed_size <= stats.raw_candidate_bytes);
     }
 
     #[test]

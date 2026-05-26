@@ -2,9 +2,9 @@
 
 _Last updated: 2026-05-26_
 
-## Honest Note on Dictionary Compaction Limits (v3 retrospective)
+## Honest Note on Dictionary Compaction Limits (v3/v4 retrospective)
 
-After landing the v3 format (ZBPK_VERSION = 3) with bit-packed everything — topology
+After landing the v3 format with bit-packed everything — topology
 nodes, framed dict, recursive-circuit fixed section, multi-block plan dictionary,
 adaptive-transformed-xz dict, monotonic-delta dict — the **total dictionary footprint
 on cat is now ~110 bytes out of 2 670 567 byte compressed output**, i.e. ~0.004 %.
@@ -12,11 +12,21 @@ Further header-level bit-packing cannot meaningfully change the ratio. The XZ-co
 payload (and the CABAC-coded correction stream for preflate paths) is >99.99 % of every
 file we ship.
 
+The v4 bump is deliberately not another dictionary-compaction round. It spends one reserved
+4-bit method slot on `raw-brotli`, a no-dictionary Brotli q11 payload for bounded text-like
+inputs. This is the kind of secondary high-performance bitstream codec that can move a
+payload when the data profile actually matches it: the paper corpus improves from raw-xz
+`20 561` bytes (`0.331549`) to raw-brotli `18 573` bytes (`0.299492`). The same outer-
+compression idea was probed on existing `.zbpk` artifacts: zstd/xz/brotli all lost on
+paper and primary; zstd saved only 58 bytes on the 83 MB depth artifact after wrapper
+overhead would leave a sub-0.0001% gain. Keep outer repacking as a future option only when
+it has a real corpus-level win.
+
 Concretely, the per-corpus ceiling for dictionary compaction is:
 
 | Corpus | Compressed file | Dictionary footprint | Hard ceiling for further header work |
 |---|---:|---:|---:|
-| paper | 20 561 B | ~17 B header, no method dict | < 17 B (4-byte magic, 2-byte version, ...) |
+| paper | 18 573 B | ~17 B header, no method dict | < 17 B (4-byte magic, 2-byte version, ...) |
 | primary.3b | 562 799 B | ~17 B header + ~12 B monotonic-delta dict | ~10 B saveable, ~0.002 % ratio |
 | cat | 2 670 567 B | ~17 B header + ~25 B recursive fixed + ~15 B framed + ~13 B topology bits | ~50 B saveable, ~0.002 % ratio |
 | depth_anything | ~83 MB | ~17 B header + ~10 B adaptive-xz dict | ~10 B saveable, ~0 % ratio |
@@ -52,6 +62,10 @@ items that actually move ratio are payload-level, not header-level.
 
 ## Recent Landed Items
 
+- **RawBrotli** (new top-level pack method, ZBPK v4) — implemented. It is gated by a cheap
+  text-likeness check plus an 8 MiB bound so binary corpora do not pay q11 Brotli cost.
+  Current paper benchmark: `62015 -> 18573`, ratio `0.299492`, validation PASS. Primary
+  remains `monotonic-delta` at `562799`, validation PASS.
 - **N1 row-aware predictors** — implemented (see N1 entry below). Available but does not
   win on already-filtered PNG IDAT data.
 - **N3 per-block transform plans** — implemented (see N3 entry below). Format extension is

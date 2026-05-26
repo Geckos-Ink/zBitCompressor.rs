@@ -13,6 +13,50 @@
 - License file: `LICENSE`
 
 ## Recent Updates
+- 2026-05-26: Added **`papers/format_description.md`**, a code-grounded technical
+  description of the current binary formats for optimization work. It documents `.zbpk`
+  v4, `.zbps` v1, and `.zbit` v1: byte order, varints, bit-stream conventions,
+  complete `.zbpk` method ids and dictionaries/payloads, recursive-circuit topology and
+  multi-block bit layouts, stream node records, validation invariants, and high/low-value
+  optimization targets. This should be the first reference when changing the output format.
+- 2026-05-26: Added ZBPK v4 `raw-brotli` as a bounded text-codec payload method after
+  probing the user's "compress the output format again" idea. External wrapper probe results:
+  zstd/xz/brotli all lost on the paper and primary `.zbpk` artifacts; zstd saved only
+  58 bytes on the 83 MB depth artifact before any wrapper metadata, so live outer repacking
+  was not worth the format complexity. The useful ratio win was a direct no-dictionary
+  Brotli q11 candidate for text-like inputs.
+
+  Files added or modified:
+  - **`zbit-rs/Cargo.toml` / `Cargo.lock`** — added `brotli = "8"` dependency.
+  - **`zbit-rs/src/pack_rules.rs`** — `PackMethod::RawBrotli` added at method index 10;
+    `AdaptiveTransformedXz` moved to 11; method selection now ranks raw-brotli by exact
+    total packed bytes.
+  - **`zbit-rs/src/pack/codecs.rs`** — `build_raw_brotli_payload` and bounded
+    `decode_raw_brotli_payload` implemented.
+  - **`zbit-rs/src/pack/core.rs`** — `ZBPK_VERSION` bumped to 4; `raw_brotli_ms` and
+    `raw_brotli_candidate_bytes` added to stats; candidate gated by an 8 MiB text-likeness
+    check so binary corpora skip q11 Brotli cost.
+  - **`zbit-rs/src/pack/stream.rs`** — updated `write_pack_bytes` callsites for the new
+    raw-brotli payload slot (stream mode does not evaluate raw-brotli).
+  - **`zbit-rs/src/pack/bitstream.rs` / `recursive.rs`** — updated future
+    `CircuitBitStream` migration comments now that v4 is consumed by raw-brotli.
+  - **`zbit-rs/src/bin/benchmark_real_file.rs`** — report now prints raw-brotli candidate
+    size and timing.
+  - **`zbit-rs/src/pack/tests.rs`** — added `adaptive_pack_can_choose_raw_brotli_and_roundtrip`
+    over the paper markdown corpus.
+  - **`README.md`, `zbit-rs/README.md`, `ROADMAP.md`, `AGENTS.md`** — documented v4,
+    raw-brotli, benchmark results, and the outer-wrapper probe.
+
+  Benchmark status:
+  - Paper corpus improved from `raw-xz` `20 561 B` (`0.331549`) to `raw-brotli`
+    `18 573 B` (`0.299492`), validation PASS.
+  - `primary.3b` remains `monotonic-delta` `562 799 B` (`0.174046`), validation PASS;
+    raw-brotli skipped by text-likeness gate.
+
+  Validation: `cargo check --manifest-path zbit-rs/Cargo.toml` PASS;
+  `cargo test -q --manifest-path zbit-rs/Cargo.toml` PASS (38 lib tests + non-ignored
+  integration tests). `cargo fmt` was attempted but blocked because `rustfmt` is not
+  installed for the active stable Apple toolchain.
 - 2026-05-26: Implemented IMMED-5 (parallelism) + IMMED-1 (`CircuitBitStream` primitive) +
   IMMED-2 (hierarchical Boolean decomposition above 16 inputs) + IMMED-3 acceptance test
   layer; documented IMMED-4 vendor-API blocker. All 42 lib tests PASS; smoke roundtrip on

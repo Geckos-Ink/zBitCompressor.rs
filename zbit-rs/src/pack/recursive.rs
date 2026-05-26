@@ -745,7 +745,7 @@ fn recursive_circuit_fixed_section_size(stream: &RecursiveCircuitStream) -> usiz
         + 2 /* topology_field u16 */
 }
 
-// IMMED-1.2 migration target (ZBPK v4): the section below currently rolls its own
+// IMMED-1.2 migration target (future ZBPK bump): the section below currently rolls its own
 // width-prefix bit encoding for the multi-block plan table. The replacement is a single
 // `CircuitBitStream::write_def_or_ref::<CircuitTransformPlan>` per plan, which:
 //   - drops the explicit `multi_block_unique_plans` dedup pass (the bit-stream interning
@@ -756,7 +756,7 @@ fn recursive_circuit_fixed_section_size(stream: &RecursiveCircuitStream) -> usiz
 //   - matches the existing per-plan bit budget (6-bit kind + nibble-varint period/head)
 //     because the `BitSerializable for CircuitTransformPlan` impl in bitstream.rs is
 //     bit-identical to today's per-plan layout.
-// Blocked by: ZBPK_VERSION bump (v3 → v4), updating decode_recursive_circuit_payload to
+// Blocked by: a ZBPK_VERSION bump after v4, updating decode_recursive_circuit_payload to
 // thread one shared `CircuitBitStreamReader` through every embedded section, and
 // updating roundtrip tests. See `pack::bitstream_integration_tests::immed_1_*` for the
 // expected savings shape on N occurrences of the same plan.
@@ -1638,4 +1638,3 @@ fn decode_recursive_circuit_payload(
 
     Ok(out)
 }
-

@@ -181,6 +181,7 @@ Indexed-circuit candidate size (bytes): {indexed_circuit}\n\
 Indexed-huffman candidate size (bytes): {indexed_huffman}\n\
 Raw-deflate candidate size (bytes): {raw_deflate}\n\
 Raw-zstd candidate size (bytes): {raw_zstd}\n\
+Raw-brotli candidate size (bytes): {raw_brotli}\n\
 Raw-xz candidate size (bytes): {raw_xz}\n\
 Framed-raw candidate size (bytes): {framed_raw}\n\
 Recursive-circuit-xz candidate size (bytes): {recursive_circuit_xz}\n\
@@ -202,6 +203,7 @@ Candidate timing breakdown (ms):\n\
 - huffman stream build: {huffman_stream_ms:.3}\n\
 - raw-deflate encode: {raw_deflate_ms:.3}\n\
 - raw-zstd encode: {raw_zstd_ms:.3}\n\
+- raw-brotli gate/encode: {raw_brotli_ms:.3}\n\
 - raw-xz encode: {raw_xz_ms:.3}\n\
 - framed extraction: {framed_extraction_ms:.3}\n\
 - recursive preflate search: {recursive_preflate_ms:.3}\n\
@@ -256,6 +258,10 @@ Output validation: {valid}\n",
             .raw_zstd_candidate_bytes
             .map(|v| v.to_string())
             .unwrap_or_else(|| "unavailable".to_string()),
+        raw_brotli = stats
+            .raw_brotli_candidate_bytes
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unavailable".to_string()),
         raw_xz = stats
             .raw_xz_candidate_bytes
             .map(|v| v.to_string())
@@ -288,6 +294,7 @@ Output validation: {valid}\n",
         huffman_stream_ms = stats.timings.huffman_stream_ms,
         raw_deflate_ms = stats.timings.raw_deflate_ms,
         raw_zstd_ms = stats.timings.raw_zstd_ms,
+        raw_brotli_ms = stats.timings.raw_brotli_ms,
         raw_xz_ms = stats.timings.raw_xz_ms,
         framed_extraction_ms = stats.timings.framed_extraction_ms,
         recursive_preflate_ms = stats.timings.recursive_preflate_ms,
