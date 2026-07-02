@@ -47,6 +47,15 @@
     ≥ 1 corpus, byte-identity elsewhere, budgets respected, every new candidate carries a
     prove-can't-win gate / sample pre-rank / deep-only gating), the queued ratio
     candidates with their time story, and a `check_benchmark_budgets.sh` harness item.
+  - **`zbit-rs/scripts/check_benchmark_budgets.sh` (new)** — the protocol harness: runs
+    the tracked non-stream benchmarks release-mode (all, or named args), checks
+    compressed bytes / wall budget / validation per corpus against the ROADMAP table,
+    temp-dir reports (never touches `*_latest.txt`), SKIPPED for missing assets,
+    non-zero exit on any violation. Wall budgets are sized to measured run-to-run
+    spread, not a flat percentage: paper 300 ms (~3x tracked; startup noise dominates
+    sub-second runs), primary 4 s (observed 2.67-3.19 s spread; still catches the
+    >= 4.3 s raw-xz matrix-walk regression), cat 38 s / depth 400 s (~10 % headroom).
+    First full run: all four corpora byte-identical and within budget.
 
   Benchmark status (balanced, release, same machine, identical bytes):
   - paper `96.7 ms` (was `820 ms` debug), ratio `0.299492`, PASS.

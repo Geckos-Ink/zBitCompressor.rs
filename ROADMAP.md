@@ -394,14 +394,17 @@ cannot state its worst-case time cost and its skip condition is not landable.**
 
 | Corpus | Compressed bytes (must not increase) | Wall budget |
 |---|---:|---:|
-| `papers/zbit-algorithmsResearch.md` | `18 573` | `0.15 s` |
-| `assets/primary.3b.bin` | `562 799` | `3.0 s` |
+| `papers/zbit-algorithmsResearch.md` | `18 573` | `0.3 s` |
+| `assets/primary.3b.bin` | `562 799` | `4.0 s` |
 | cat challenge | `2 670 567` | `38 s` |
 | `depth_anything_v2_vits.pth` | `83 380 762` | `400 s` |
 
-Wall budgets are the current measurement plus ~10 % headroom. A ratio win may raise a
-budget only when the same commit re-baselines the table with the measured numbers and
-says why the extra time buys bytes.
+Wall budgets are sized to the measured run-to-run spread, not a flat percentage: paper
+~3x its tracked 97 ms (sub-second runs are dominated by startup noise), primary ~1.5x its
+typical 2.7 s (observed 2.67-3.19 s spread; the budget still catches re-enabling the
+raw-xz matrix walk, which costs >= 4.3 s), cat and depth ~10 % over their measurements.
+A ratio win may raise a budget only when the same commit re-baselines the table with the
+measured numbers and says why the extra time buys bytes.
 
 ### Acceptance protocol for any ratio-motivated change
 
@@ -444,12 +447,17 @@ says why the extra time buys bytes.
 5. **IMMED-4 typed CABAC substreams** — still blocked on the vendor patch (see IMMED-4);
    no in-tree path.
 
-### Harness item (small, do first)
+### Harness item — implemented 2026-07-02
 
-Add `zbit-rs/scripts/check_benchmark_budgets.sh`: runs the four benchmarks with the
-release binary, extracts `(compressed bytes, compression ms)` from each report, fails if
-any byte count exceeds the table above or any wall time exceeds its budget. This turns
-the protocol into one command instead of four manual diffs.
+`zbit-rs/scripts/check_benchmark_budgets.sh` runs the tracked non-stream benchmarks with
+the release binary (all four by default, or the corpora named as arguments, e.g.
+`check_benchmark_budgets.sh paper cat`), extracts `(compressed bytes, compression ms,
+validation)` from each report, and fails if any byte count exceeds the table above, any
+wall time exceeds its budget, or validation is not PASS. Reports go to a temp dir so the
+tracked `*_latest.txt` files are never clobbered by a check run. Missing assets (e.g. the
+depth model before its first download) are reported as SKIPPED, not failures. When a
+corpus compresses to fewer bytes than the baseline the status says so explicitly as a
+reminder to re-baseline both tables in the same commit.
 
 ---
 
