@@ -13,6 +13,54 @@
 - License file: `LICENSE`
 
 ## Recent Updates
+- 2026-07-02: Benchmark-suite runtime pass (non-stream). **No format change; all tracked
+  compressed outputs byte-identical** (paper `18573`, primary `562799`, cat `2670567`).
+
+  Files modified:
+  - **`zbit-rs/src/pack/core.rs`** — (a) prelude candidates (index+huffman chain, deflate,
+    zstd, brotli, cheap raw-xz preset-3 estimate) now run concurrently via nested
+    `rayon::join`; (b) the raw-xz tuning-matrix skip gate considers all structural
+    candidates, tiered: skip when structural ≤ 5/8 of the cheap preset-3 total, else one
+    easy XZ-9 probe and skip when structural beats it by > 1/16 (matrix entries are all
+    preset-9 variants with a few-percent spread); (c) new
+    `CompressionProfile::enable_xz_extreme_winner_refine` (deep/research only);
+    (d) `raw_xz_ms` now reports only the cheap estimate + probe/matrix work instead of
+    absorbing the recursive/monotonic/adaptive build time.
+  - **`zbit-rs/src/pack/transforms.rs`** — forced transform-plan variants are collected
+    into an auxiliary list, pre-ranked with the existing cheap 512 KiB sample scorer, and
+    only a profile-bounded top slice (fast 2 / balanced 4 / deep+research unbounded) enters
+    the full-data XZ-3 Phase-A ranking; the winner tuned-XZ refinement uses the new
+    deep/research-only extreme gate; refinement time is now included in the reported
+    `recursive transform evaluation` and traced via `plan-eval-phases` under
+    `ZBIT_TRACE_RECURSIVE=1`.
+  - **`zbit-rs/src/pack/codecs.rs`** — `build_raw_brotli_payload` probes
+    `BROTLI_MODE_TEXT` and `BROTLI_MODE_GENERIC` in parallel (lgwin 24) and keeps the
+    smaller payload; same stream format, decode unchanged.
+  - **`zbit-rs/Cargo.toml`** — `[profile.dev] opt-level = 1` and
+    `[profile.dev.package."*"] opt-level = 3` so tests/dev runs use optimized codec
+    dependencies; **`zbit-rs/scripts/benchmark_cat_challenge.sh`** now runs `--release`
+    (it was the only benchmark script still running debug builds).
+  - **`README.md`, `ROADMAP.md`** — refreshed benchmark tables and documented the pass.
+    ROADMAP also gained a **"Ratio-Improvement Evaluation Protocol"** section: per-corpus
+    byte/wall budgets (paper 0.15 s, primary 3 s, cat 38 s, depth 400 s at balanced,
+    release), the acceptance checklist for ratio-motivated changes (strict byte win on
+    ≥ 1 corpus, byte-identity elsewhere, budgets respected, every new candidate carries a
+    prove-can't-win gate / sample pre-rank / deep-only gating), the queued ratio
+    candidates with their time story, and a `check_benchmark_budgets.sh` harness item.
+
+  Benchmark status (balanced, release, same machine, identical bytes):
+  - paper `96.7 ms` (was `820 ms` debug), ratio `0.299492`, PASS.
+  - primary.3b `2 716 ms` (was `4 784 ms` release-to-release; `9 803 ms` in the old debug
+    report), ratio `0.174046`, PASS — the raw-xz matrix is skipped outright.
+  - cat `34 343 ms` (was `51 833 ms` release-to-release; `58 945-94 527 ms` debug),
+    ratio `0.899361`, PASS — easy-9 probe tier fires; Phase-A plans 35 -> 20; extreme
+    refinement dropped at balanced (measured contributing nothing to the winner).
+  - depth_anything `359 490 ms` (was `628 278 ms`, both release via the script), ratio
+    `0.840376`, output bytes identical (`83 380 762`), PASS — the trimmed winner
+    refinement and aux-plan bound did not change the adaptive selection.
+
+  Validation: `cargo test -q` PASS (38 lib + integration, non-ignored). Deep/research
+  budgets intentionally unchanged (aux trimming and extreme-refine gate do not apply).
 - 2026-05-26: Added **`papers/format_description.md`**, a code-grounded technical
   description of the current binary formats for optimization work. It documents `.zbpk`
   v4, `.zbps` v1, and `.zbit` v1: byte order, varints, bit-stream conventions,

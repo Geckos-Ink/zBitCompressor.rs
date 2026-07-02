@@ -1,6 +1,6 @@
 # zBit Circuit-Based Compression Roadmap
 
-_Last updated: 2026-05-26_
+_Last updated: 2026-07-02_
 
 ## Honest Note on Dictionary Compaction Limits (v3/v4 retrospective)
 
@@ -62,6 +62,34 @@ items that actually move ratio are payload-level, not header-level.
 
 ## Recent Landed Items
 
+- **2026-07-02 benchmark-runtime pass** (no format change, all tracked output bytes
+  identical). Four search-cost cuts plus measurement fixes:
+  1. The raw-xz tuning-matrix skip gate (`core.rs`) now considers all structural candidates
+     (recursive-circuit-xz, monotonic-delta, adaptive-transformed-xz), tiered: skip outright
+     when the structural candidate is ≤ 5/8 of the cheap preset-3 total; in the borderline
+     band, one easy XZ-9 probe bounds the matrix (every entry is a preset-9 variant with a
+     few-percent spread vs easy-9) and the matrix is skipped when the structural candidate
+     beats the probe by more than 1/16. Primary and cat no longer walk the matrix.
+  2. Forced transform-plan variants (tail delta/xor/gather heads, bit-plane-on-tail, row
+     predictors) are pre-ranked on the existing 512 KiB sample and only a profile-bounded
+     top slice pays the full-data XZ-3 ranking encode (fast 2 / balanced 4 / deep+research
+     unbounded). Cat balanced: 35 -> 20 Phase-A encodes.
+  3. The winner tuned-XZ refinement after plan search uses extreme presets only on
+     deep/research (`enable_xz_extreme_winner_refine`). Measured on cat: the extreme jobs
+     doubled the refinement wall time (14.9 s -> 6.4 s without them) and the refinement
+     winner was already held by the Phase-B XZ-9 pass.
+  4. Prelude candidates (index/huffman/deflate/zstd/brotli/cheap-xz estimate) run
+     concurrently via nested `rayon::join`.
+  Measurement fixes: the cat benchmark script now runs `--release` like the depth script
+  (debug builds roughly doubled its wall time); `raw_xz_ms` no longer absorbs the
+  recursive/monotonic/adaptive build time (cat reported 51 s where the true matrix cost
+  was ~1.6 s); the winner-refinement time is now included in `recursive transform
+  evaluation`; `[profile.dev.package."*"] opt-level = 3` makes `cargo test` run optimized
+  codec dependencies. Balanced results (release-to-release, identical bytes): primary
+  `4.8 s -> 2.7 s`, cat `51.8 s -> 34.3 s`, depth_anything `628 s -> 359 s` (IMMED-5's
+  `< 120 s` target is still open; the remaining depth cost is the adaptive plan search
+  itself, not the raw-xz matrix). Raw-brotli additionally probes TEXT vs GENERIC mode in
+  parallel (ties on paper; may help other text corpora).
 - **RawBrotli** (new top-level pack method, ZBPK v4) — implemented. It is gated by a cheap
   text-likeness check plus an 8 MiB bound so binary corpora do not pay q11 Brotli cost.
   Current paper benchmark: `62015 -> 18573`, ratio `0.299492`, validation PASS. Primary
@@ -349,6 +377,79 @@ parallelizable with `par_iter`.
 - `fast` and `balanced` profiles are not slowed by the parallel infrastructure (thread pool
   is bounded by profile budget).
 - Throughput is reported in MiB/s in all benchmark output alongside existing timing fields.
+
+---
+
+## Ratio-Improvement Evaluation Protocol (Guarding the 2026-07-02 Time Budget)
+
+**The problem.** Ratio improvements have historically landed by adding candidates
+unconditionally: every new transform family, tuning entry, and codec probe paid a
+full-data encode on every input whether or not it could win. That is exactly how the
+suite drifted to 65 s on cat and 628 s on depth — the search paid for everything and
+proved nothing. The 2026-07-02 pass recovered ~2x wall time by adding upper-bound probes
+and sample pre-ranking; those wall times are now the budget. **A ratio candidate that
+cannot state its worst-case time cost and its skip condition is not landable.**
+
+### Budgets (balanced profile, release build)
+
+| Corpus | Compressed bytes (must not increase) | Wall budget |
+|---|---:|---:|
+| `papers/zbit-algorithmsResearch.md` | `18 573` | `0.15 s` |
+| `assets/primary.3b.bin` | `562 799` | `3.0 s` |
+| cat challenge | `2 670 567` | `38 s` |
+| `depth_anything_v2_vits.pth` | `83 380 762` | `400 s` |
+
+Wall budgets are the current measurement plus ~10 % headroom. A ratio win may raise a
+budget only when the same commit re-baselines the table with the measured numbers and
+says why the extra time buys bytes.
+
+### Acceptance protocol for any ratio-motivated change
+
+1. Run all four non-stream benchmarks with the release binary. Compressed bytes must be
+   **strictly smaller on at least one corpus and byte-identical on the rest** — a change
+   that shuffles candidates without changing bytes must reproduce every tracked byte
+   count exactly (this is how the 2026-07-02 pass was verified).
+2. Wall time within budget on every corpus, single cold run.
+3. `Output validation: PASS` everywhere; `cargo test -q` green.
+4. A new candidate must carry at least one of:
+   - a **prove-can't-win gate**: a cheap encode that upper-bounds the expensive search
+     (pattern: preset-3 estimate + 5/8 rule; easy XZ-9 probe + 1/16 rule in
+     `core.rs`);
+   - **sample pre-rank admission**: scored on the 512 KiB zstd-1 sample before any
+     full-data encode (pattern: `aux_forced_budget` in `transforms.rs`);
+   - **deep/research-only gating**, promoted to balanced later with a measured
+     bytes-per-second case (pattern: row predictors, `enable_xz_extreme_winner_refine`).
+5. When trimming or reordering search, capture `ZBIT_TRACE_RECURSIVE=1` before/after and
+   verify the winner plan/codec line is unchanged, not just the final byte count.
+
+### Queued ratio candidates, each with its time story
+
+1. **Monotonic gap-stream secondary transform** (primary stretch `< 0.170`). Needs a
+   ZBPK v5 monotonic dictionary slot carrying an optional `(kind, period, head)` plan
+   applied to the gap stream before codec selection. Time cost: plan search over the
+   ~1 MiB gap payload is hundreds of ms and runs **only when monotonic-delta already
+   beat every raw candidate**, so paper/cat/depth pay nothing. Accept: primary bytes
+   `< 562 799`, wall `≤ 3.0 s`.
+2. **Container-aware depth path** (depth stretch `< 0.80`). Parse the PK-ZIP wrapper,
+   split metadata from tensor bulk, per-entry plan search bounded by sample pre-rank.
+   Expected to *reduce* wall time too: many small bounded searches replace one 95 MiB
+   search. Accept: depth bytes `< 83 380 762`, wall `≤ 400 s`.
+3. **N4 LZMA delta filter** (lzma-sys raw filter chain; `delta_dist` field already
+   inert in `XzTuningParams`). Admission rule: add delta entries to the matrix **only
+   when the existing autocorrelation scan reports a dominant period ∈ {2,3,4,8}**,
+   never unconditionally. Accept: bytes down somewhere, cat wall `≤ 38 s`.
+4. **Brotli as inner payload codec** for transformed/gap payloads. Blocked on the
+   saturated 2-bit `PayloadCodec` field — fold the field widening into the same v5 bump
+   as (1); probe gated by the same text-likeness + size checks as top-level raw-brotli.
+5. **IMMED-4 typed CABAC substreams** — still blocked on the vendor patch (see IMMED-4);
+   no in-tree path.
+
+### Harness item (small, do first)
+
+Add `zbit-rs/scripts/check_benchmark_budgets.sh`: runs the four benchmarks with the
+release binary, extracts `(compressed bytes, compression ms)` from each report, fails if
+any byte count exceeds the table above or any wall time exceeds its budget. This turns
+the protocol into one command instead of four manual diffs.
 
 ---
 

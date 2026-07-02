@@ -42,7 +42,7 @@ if len(data) < 40 * 1024 * 1024:
 print(" | ".join(msg))
 PY
 
-cargo run --manifest-path "$repo_root/zbit-rs/Cargo.toml" --bin zbit-benchmark -- \
+cargo run --release --manifest-path "$repo_root/zbit-rs/Cargo.toml" --bin zbit-benchmark -- \
   "$asset_path" \
   "$pack_path" \
   "$report_path"

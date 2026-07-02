@@ -62,13 +62,47 @@ fn decode_raw_zstd_payload(payload: &[u8], original_size: usize) -> ZbitResult<V
     Ok(out)
 }
 
-fn build_raw_brotli_payload(input: &[u8]) -> ZbitResult<Vec<u8>> {
-    let mut encoder = brotli::CompressorReader::new(Cursor::new(input), 64 * 1024, 11, 22);
+fn brotli_encode_with_mode(
+    input: &[u8],
+    mode: brotli::enc::backward_references::BrotliEncoderMode,
+) -> ZbitResult<Vec<u8>> {
+    let mut params = brotli::enc::BrotliEncoderParams::default();
+    params.quality = 11;
+    // 24 is the largest standard window; it only matters for inputs above the 4 MiB
+    // window implied by lgwin 22 and costs nothing on smaller ones.
+    params.lgwin = 24;
+    params.mode = mode;
     let mut out = Vec::new();
-    encoder
-        .read_to_end(&mut out)
+    brotli::BrotliCompress(&mut Cursor::new(input), &mut out, &params)
         .map_err(|e| ZbitError::Io(format!("brotli encode failed: {e}")))?;
     Ok(out)
+}
+
+fn build_raw_brotli_payload(input: &[u8]) -> ZbitResult<Vec<u8>> {
+    // The candidate is gated by a text-likeness check, so the TEXT context model usually
+    // wins; GENERIC is kept as the second probe because mixed markdown/binary payloads
+    // occasionally prefer it. Both decode with the same stream format.
+    let (text, generic) = rayon::join(
+        || {
+            brotli_encode_with_mode(
+                input,
+                brotli::enc::backward_references::BrotliEncoderMode::BROTLI_MODE_TEXT,
+            )
+        },
+        || {
+            brotli_encode_with_mode(
+                input,
+                brotli::enc::backward_references::BrotliEncoderMode::BROTLI_MODE_GENERIC,
+            )
+        },
+    );
+    let text = text?;
+    let generic = generic?;
+    Ok(if text.len() <= generic.len() {
+        text
+    } else {
+        generic
+    })
 }
 
 fn decode_raw_brotli_payload(payload: &[u8], original_size: usize) -> ZbitResult<Vec<u8>> {

@@ -1,7 +1,7 @@
 zBit-rs Real File Benchmark Report
-Generated: 2026-05-23 17:26:42
-Input file: assets/depth_anything_v2_vits.pth
-Compressed artifact: /tmp/depth_anything.zbpk
+Generated: 2026-07-02 08:59:01
+Input file: /Users/riccardo/Sources/GitHub/zBitCompressor.rs/assets/depth_anything_v2_vits.pth
+Compressed artifact: /Users/riccardo/Sources/GitHub/zBitCompressor.rs/zbit-rs/benchmark_depth_anything.zbpk
 
 Active profile: balanced
 Selected method: adaptive-transformed-xz
@@ -9,6 +9,7 @@ Selection reason: adaptive-transformed-xz improves size: 99218463 -> 83380772 by
 Circuit evaluation rule: symbol width <= 8 bits: raw dictionary is denser than circuit descriptors
 
 Skipped candidates:
+- raw-brotli skipped: bounded text-likeness gate did not pass
 - recursive-circuit-xz skipped: framed payload analyzer unavailable
 - raw-xz full tuning matrix skipped: adaptive-transformed-xz clearly wins
 - indexed-circuit skipped: symbol width <= 8 bits: raw dictionary is denser than circuit descriptors
@@ -19,6 +20,7 @@ Indexed-circuit candidate size (bytes): skipped by rules
 Indexed-huffman candidate size (bytes): 92218133
 Raw-deflate candidate size (bytes): 92076337
 Raw-zstd candidate size (bytes): 91967666
+Raw-brotli candidate size (bytes): unavailable
 Raw-xz candidate size (bytes): 92125733
 Framed-raw candidate size (bytes): unavailable
 Recursive-circuit-xz candidate size (bytes): unavailable
@@ -30,21 +32,22 @@ Compressed size (bytes): 83380762
 Compression ratio (compressed/original): 0.840376
 Space savings (%): 15.96
 
-Compression time (ms): 628278.163
-Decompression time (ms): 177.783
-Compression throughput (MiB/s): 0.151
-Decompression throughput (MiB/s): 532.233
+Compression time (ms): 359490.041
+Decompression time (ms): 220.875
+Compression throughput (MiB/s): 0.263
+Decompression throughput (MiB/s): 428.397
 
 Candidate timing breakdown (ms):
-- index stream build: 2503.106
-- huffman stream build: 3184.683
-- raw-deflate encode: 2228.649
-- raw-zstd encode: 18654.310
-- raw-xz encode: 601549.725
-- framed extraction: 234.143
+- index stream build: 2612.502
+- huffman stream build: 3273.433
+- raw-deflate encode: 2343.962
+- raw-zstd encode: 17420.939
+- raw-brotli gate/encode: 0.000
+- raw-xz encode: 32542.783
+- framed extraction: 247.465
 - recursive preflate search: 0.000
-- recursive transform sampling: 78.824
-- recursive transform evaluation: 291259.470
+- recursive transform sampling: 98.992
+- recursive transform evaluation: 325682.823
 - recursive correction modeling: 0.000
 - recursive total: 0.000
 - candidate validation: 0.000

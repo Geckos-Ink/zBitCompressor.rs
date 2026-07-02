@@ -1523,6 +1523,12 @@ fn choose_adaptive_transform_plan(
         }
     }
 
+    // Auxiliary forced candidates (tail-delta/xor/gather variants, bit-plane-on-tail,
+    // row predictors) are collected first and then pre-ranked on the cheap sample below;
+    // only the head-tail(period, 1) insurance plans skip the ranking, because they are
+    // the winner class on framed image payloads and cost two slots at most.
+    let mut aux_forced = Vec::<CircuitTransformPlan>::new();
+    let mut aux_seen = HashSet::<CircuitTransformPlan>::new();
     for (idx, period) in high_corr_periods.into_iter().take(2).enumerate() {
         let plan = CircuitTransformPlan {
             kind: CircuitTransformKind::PeriodicHeadTail,
@@ -1555,8 +1561,8 @@ fn choose_adaptive_transform_plan(
                     period: period_u32,
                     head: 4,
                 };
-                if selected_set.insert(forced) {
-                    selected.push(forced);
+                if !selected_set.contains(&forced) && aux_seen.insert(forced) {
+                    aux_forced.push(forced);
                 }
             }
 
@@ -1572,8 +1578,8 @@ fn choose_adaptive_transform_plan(
                         period: period_u32,
                         head,
                     };
-                    if selected_set.insert(forced) {
-                        selected.push(forced);
+                    if !selected_set.contains(&forced) && aux_seen.insert(forced) {
+                        aux_forced.push(forced);
                     }
                 }
             }
@@ -1590,8 +1596,8 @@ fn choose_adaptive_transform_plan(
                     period: period_u32,
                     head: 0,
                 };
-                if selected_set.insert(forced) {
-                    selected.push(forced);
+                if !selected_set.contains(&forced) && aux_seen.insert(forced) {
+                    aux_forced.push(forced);
                 }
             }
 
@@ -1617,8 +1623,8 @@ fn choose_adaptive_transform_plan(
                                 period: period_u32,
                                 head: pixel_stride,
                             };
-                            if selected_set.insert(forced) {
-                                selected.push(forced);
+                            if !selected_set.contains(&forced) && aux_seen.insert(forced) {
+                                aux_forced.push(forced);
                             }
                         }
                     }
@@ -1629,10 +1635,49 @@ fn choose_adaptive_transform_plan(
                     period: period_u32,
                     head: 0,
                 };
-                if selected_set.insert(row_up) {
-                    selected.push(row_up);
+                if !selected_set.contains(&row_up) && aux_seen.insert(row_up) {
+                    aux_forced.push(row_up);
                 }
             }
+        }
+    }
+
+    // Pre-rank the auxiliary forced candidates on the same cheap sample used for the main
+    // pool, and keep only a profile-bounded top slice. Before this bound, ~27 forced
+    // variants each paid a full-data XZ-3 encode in Phase A even though the quick ranking
+    // discarded almost all of them (measured ~12 s of the cat-challenge balanced encode).
+    // Deep/research keep the full set: those profiles opt into exhaustive search.
+    let aux_forced_budget = match profile {
+        CompressionProfile::Fast => 2usize,
+        CompressionProfile::Balanced => 4,
+        CompressionProfile::Deep | CompressionProfile::Research => usize::MAX,
+    };
+    let aux_kept: Vec<CircuitTransformPlan> = if aux_forced.len() <= aux_forced_budget {
+        aux_forced
+    } else {
+        let mut aux_scored = aux_forced
+            .par_iter()
+            .map(|plan| {
+                let Some(transformed_sample) = apply_transform_plan(sample, plan) else {
+                    return Ok::<_, ZbitError>(None);
+                };
+                let quick = zstd_encode_with_level(&transformed_sample, quick_zstd_level)?.len();
+                Ok(Some((*plan, quick)))
+            })
+            .collect::<ZbitResult<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        aux_scored.sort_unstable_by_key(|entry| entry.1);
+        aux_scored
+            .into_iter()
+            .take(aux_forced_budget)
+            .map(|(plan, _)| plan)
+            .collect()
+    };
+    for plan in aux_kept {
+        if selected_set.insert(plan) {
+            selected.push(plan);
         }
     }
 
@@ -1792,15 +1837,26 @@ fn choose_adaptive_transform_plan(
         })?;
     let topology = build_topology_for_plan(&plan)?;
 
+    let refine_timer = Instant::now();
     if let Some((candidate_codec, candidate_payload)) = choose_best_tuned_xz_candidate(
         &transformed,
         profile,
-        profile.enable_xz_extreme_refinement(),
+        profile.enable_xz_extreme_winner_refine(),
     )? {
         if candidate_payload.len() < encoded.len() {
             codec = candidate_codec;
             encoded = candidate_payload;
         }
+    }
+    let refine_ms = refine_timer.elapsed().as_secs_f64() * 1000.0;
+    if trace_recursive {
+        eprintln!(
+            "zbit-trace plan-eval-phases plans={} sampling_ms={:.1} eval_ms={:.1} winner-tuned-refine_ms={:.1}",
+            selected.len(),
+            sampling_ms,
+            eval_ms,
+            refine_ms,
+        );
     }
 
     Ok(AdaptiveTransformResult {
@@ -1809,7 +1865,9 @@ fn choose_adaptive_transform_plan(
         codec,
         payload: encoded,
         sampling_ms,
-        eval_ms,
+        // The winner tuned-XZ refinement is part of the evaluation cost; report it there
+        // so the recursive timing breakdown accounts for the full plan-search wall time.
+        eval_ms: eval_ms + refine_ms,
     })
 }
 

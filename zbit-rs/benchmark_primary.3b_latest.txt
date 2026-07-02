@@ -1,5 +1,5 @@
 zBit-rs Real File Benchmark Report
-Generated: 2026-05-26 01:22:11
+Generated: 2026-07-02 08:52:00
 Input file: assets/primary.3b.bin
 Compressed artifact: zbit-rs/benchmark_primary.3b.zbpk
 
@@ -12,6 +12,7 @@ Skipped candidates:
 - raw-brotli skipped: bounded text-likeness gate did not pass
 - recursive-circuit-xz skipped: framed payload analyzer unavailable
 - adaptive-transformed-xz skipped: raw-xz already strong (ratio <= 0.30, payload 913588 on input 3233613)
+- raw-xz full tuning matrix skipped: structural candidate beats cheap raw-xz estimate beyond any plausible tuning gain
 - indexed-circuit skipped: symbol width <= 8 bits: raw dictionary is denser than circuit descriptors
 
 Raw candidate size (bytes): 3233642
@@ -21,7 +22,7 @@ Indexed-huffman candidate size (bytes): 3230724
 Raw-deflate candidate size (bytes): 2682643
 Raw-zstd candidate size (bytes): 2590868
 Raw-brotli candidate size (bytes): unavailable
-Raw-xz candidate size (bytes): 833405
+Raw-xz candidate size (bytes): 913617
 Framed-raw candidate size (bytes): unavailable
 Recursive-circuit-xz candidate size (bytes): unavailable
 Monotonic-delta candidate size (bytes): 562810
@@ -32,19 +33,19 @@ Compressed size (bytes): 562799
 Compression ratio (compressed/original): 0.174046
 Space savings (%): 82.60
 
-Compression time (ms): 9803.097
-Decompression time (ms): 133.500
-Compression throughput (MiB/s): 0.315
-Decompression throughput (MiB/s): 23.100
+Compression time (ms): 2716.613
+Decompression time (ms): 28.765
+Compression throughput (MiB/s): 1.135
+Decompression throughput (MiB/s): 107.208
 
 Candidate timing breakdown (ms):
-- index stream build: 319.562
-- huffman stream build: 539.200
-- raw-deflate encode: 580.489
-- raw-zstd encode: 1314.297
-- raw-brotli gate/encode: 70.603
-- raw-xz encode: 6977.672
-- framed extraction: 341.966
+- index stream build: 72.064
+- huffman stream build: 80.371
+- raw-deflate encode: 81.527
+- raw-zstd encode: 276.512
+- raw-brotli gate/encode: 4.688
+- raw-xz encode: 406.005
+- framed extraction: 38.441
 - recursive preflate search: 0.000
 - recursive transform sampling: 0.000
 - recursive transform evaluation: 0.000
@@ -54,7 +55,7 @@ Candidate timing breakdown (ms):
 
 Cache stats:
 - codec hits/misses: 1/4
-- tuned-xz hits/misses: 0/1
+- tuned-xz hits/misses: 0/0
 - preflate hits/misses: 0/0
 - stream-range hits/misses: 0/0
 

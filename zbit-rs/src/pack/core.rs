@@ -130,6 +130,17 @@ impl CompressionProfile {
         !matches!(self, Self::Fast)
     }
 
+    fn enable_xz_extreme_winner_refine(self) -> bool {
+        // The winner tuned-XZ refinement after a transform-plan search re-encodes one
+        // already-chosen payload with the tuning matrix. The extreme-preset entries there
+        // double the wall time of the whole refinement (they are the slowest jobs) and
+        // have not been observed to beat the plain preset-9 variants on a transformed
+        // payload (cat: refine wins nothing; the Phase-B XZ-9 pass already holds the
+        // winner). Keep extreme in the refinement only where the user opted into
+        // exhaustive search.
+        matches!(self, Self::Deep | Self::Research)
+    }
+
     fn should_attempt_recursive_on_realtime_blocks(self) -> bool {
         !matches!(self, Self::Fast)
     }
@@ -1589,52 +1600,100 @@ fn compress_adaptive_to_bytes_inner(
     let total_timer = Instant::now();
     let mut context = CompressionContext::new(profile);
 
-    let index_timer = Instant::now();
-    let stream = build_index_stream(input)?;
-    context.timings.index_stream_ms = index_timer.elapsed().as_secs_f64() * 1000.0;
+    // The prelude candidates are independent of each other (huffman depends only on the
+    // index stream), so they evaluate concurrently. Each closure times its own work; the
+    // per-stage timings therefore report CPU spans that overlap in wall time. The cheap
+    // raw-xz preset-3 estimate joins the same batch: it is needed later as the gate for
+    // the adaptive-transformed-xz path and the raw-xz tuning-matrix skip decision.
+    let (index_huffman, (deflate_res, (zstd_res, (brotli_res, xz_cheap_res)))) = rayon::join(
+        || {
+            let index_timer = Instant::now();
+            let stream = build_index_stream(input)?;
+            let index_ms = index_timer.elapsed().as_secs_f64() * 1000.0;
+            let huffman_timer = Instant::now();
+            let huffman_stream = build_huffman_stream(input, &stream)?;
+            let huffman_ms = huffman_timer.elapsed().as_secs_f64() * 1000.0;
+            Ok::<_, ZbitError>((stream, huffman_stream, index_ms, huffman_ms))
+        },
+        || {
+            rayon::join(
+                || {
+                    let timer = Instant::now();
+                    let payload = build_raw_deflate_payload(input)?;
+                    Ok::<_, ZbitError>((payload, timer.elapsed().as_secs_f64() * 1000.0))
+                },
+                || {
+                    rayon::join(
+                        || {
+                            let timer = Instant::now();
+                            let payload = build_raw_zstd_payload(input)?;
+                            Ok::<_, ZbitError>((payload, timer.elapsed().as_secs_f64() * 1000.0))
+                        },
+                        || {
+                            rayon::join(
+                                || {
+                                    let timer = Instant::now();
+                                    let payload = if should_evaluate_raw_brotli(input) {
+                                        Some(build_raw_brotli_payload(input)?)
+                                    } else {
+                                        None
+                                    };
+                                    Ok::<_, ZbitError>((
+                                        payload,
+                                        timer.elapsed().as_secs_f64() * 1000.0,
+                                    ))
+                                },
+                                || {
+                                    let timer = Instant::now();
+                                    let payload = xz_encode_easy_preset(input, 3)?;
+                                    Ok::<_, ZbitError>((
+                                        payload,
+                                        timer.elapsed().as_secs_f64() * 1000.0,
+                                    ))
+                                },
+                            )
+                        },
+                    )
+                },
+            )
+        },
+    );
+    let (stream, huffman_stream, index_ms, huffman_ms) = index_huffman?;
+    context.timings.index_stream_ms = index_ms;
+    context.timings.huffman_stream_ms = huffman_ms;
 
     let raw_candidate_bytes = ZBPK_HEADER_BYTES + input.len();
     let indexed_raw_candidate_bytes =
         ZBPK_HEADER_BYTES + stream.unique_symbols.len() + stream.payload.len();
-
-    let huffman_timer = Instant::now();
-    let huffman_stream = build_huffman_stream(input, &stream)?;
-    context.timings.huffman_stream_ms = huffman_timer.elapsed().as_secs_f64() * 1000.0;
     let indexed_huffman_candidate_bytes = huffman_stream
         .as_ref()
         .map(|hs| ZBPK_HEADER_BYTES + hs.symbols.len() * 2 + hs.payload.len());
 
-    let raw_deflate_timer = Instant::now();
-    let raw_deflate_payload = build_raw_deflate_payload(input)?;
-    context.timings.raw_deflate_ms = raw_deflate_timer.elapsed().as_secs_f64() * 1000.0;
+    let (raw_deflate_payload, raw_deflate_ms) = deflate_res?;
+    context.timings.raw_deflate_ms = raw_deflate_ms;
     let raw_deflate_candidate_bytes = Some(ZBPK_HEADER_BYTES + raw_deflate_payload.len());
 
-    let raw_zstd_timer = Instant::now();
-    let raw_zstd_payload = build_raw_zstd_payload(input)?;
-    context.timings.raw_zstd_ms = raw_zstd_timer.elapsed().as_secs_f64() * 1000.0;
+    let (raw_zstd_payload, raw_zstd_ms) = zstd_res?;
+    context.timings.raw_zstd_ms = raw_zstd_ms;
     let raw_zstd_candidate_bytes = Some(ZBPK_HEADER_BYTES + raw_zstd_payload.len());
 
-    let raw_brotli_timer = Instant::now();
-    let raw_brotli_payload = if should_evaluate_raw_brotli(input) {
-        Some(build_raw_brotli_payload(input)?)
-    } else {
+    let (raw_brotli_payload, raw_brotli_ms) = brotli_res?;
+    context.timings.raw_brotli_ms = raw_brotli_ms;
+    if raw_brotli_payload.is_none() {
         context.push_skipped("raw-brotli skipped: bounded text-likeness gate did not pass");
-        None
-    };
-    context.timings.raw_brotli_ms = raw_brotli_timer.elapsed().as_secs_f64() * 1000.0;
+    }
     let raw_brotli_candidate_bytes = raw_brotli_payload
         .as_ref()
         .map(|payload| ZBPK_HEADER_BYTES + payload.len());
 
-    // First a cheap raw-xz estimate (preset 3, no tuning matrix). Used as a gate for the
-    // adaptive-transformed-xz path AND, more importantly, as a fast way to decide whether
+    // The cheap raw-xz estimate (preset 3, no tuning matrix) is the gate for the
+    // adaptive-transformed-xz path AND, more importantly, the fast way to decide whether
     // running the full raw-xz tuning matrix is worth it. On a 95 MiB PyTorch model the
-    // full matrix walks ~5-10 minutes; if we can prove from the cheap estimate that
-    // adaptive will win by a wide margin, we skip the matrix entirely and use the cheap
-    // payload as the raw-xz candidate (which then loses selection to adaptive anyway).
-    let raw_xz_timer = Instant::now();
-    let raw_xz_cheap_payload = xz_encode_easy_preset(input, 3)?;
+    // full matrix walks ~5-10 minutes; if the estimate proves a structural candidate wins
+    // by a wide margin, the matrix is skipped entirely (see the tiered gate below).
+    let (raw_xz_cheap_payload, raw_xz_cheap_ms) = xz_cheap_res?;
     let raw_xz_cheap_size = raw_xz_cheap_payload.len();
+    let mut raw_xz_elapsed_ms = raw_xz_cheap_ms;
 
     if !context.profile.enable_xz_extreme_for_raw_xz() {
         context.push_skipped(format!(
@@ -1674,25 +1733,78 @@ fn compress_adaptive_to_bytes_inner(
         Some(raw_xz_cheap_size),
     )?;
 
-    // Now decide whether the full raw-xz tuning matrix is worth the cost. Skip when
-    // adaptive clearly wins (at least 1 KiB ahead of the cheap raw-xz estimate); in that
-    // case the cheap payload is used as the raw-xz candidate and will lose selection to
-    // adaptive. This is the time win we previously had to pay for unconditionally.
-    let raw_xz_payload = match adaptive_xz_stream.as_ref() {
-        Some(adaptive) if adaptive.payload.len() + 1024 < raw_xz_cheap_size => {
-            context.push_skipped(
-                "raw-xz full tuning matrix skipped: adaptive-transformed-xz clearly wins"
-                    .to_string(),
-            );
-            raw_xz_cheap_payload
-        }
-        _ => build_raw_xz_payload(input, &mut context)?,
-    };
-    context.timings.raw_xz_ms = raw_xz_timer.elapsed().as_secs_f64() * 1000.0;
-    let raw_xz_candidate_bytes = Some(ZBPK_HEADER_BYTES + raw_xz_payload.len());
     let adaptive_transformed_xz_candidate_bytes = adaptive_xz_stream.as_ref().map(|stream| {
         ZBPK_HEADER_BYTES + adaptive_transformed_xz_dictionary_size(stream) + stream.payload.len()
     });
+
+    // Now decide whether the full raw-xz tuning matrix is worth the cost. All structural
+    // candidates (recursive-circuit-xz, monotonic-delta, adaptive-transformed-xz) are
+    // already sized at this point, so the decision tiers are:
+    //   1. adaptive clearly wins over the cheap estimate (the original depth_anything gate);
+    //   2. the best structural candidate is at most 5/8 of the cheap raw-xz total — the
+    //      tuning matrix would need a >37% gain over preset 3 to even tie, beyond anything
+    //      the preset-9 parameter matrix has ever produced;
+    //   3. the structural candidate beats the cheap estimate by at least 1 KiB but not by
+    //      the 5/8 margin: pay a single easy XZ-9 probe. Every matrix entry is a preset-9
+    //      variant whose spread vs easy-9 is a few percent, so if the structural candidate
+    //      still beats easy-9 by more than 1/16 the matrix cannot win and is skipped.
+    // Whenever the matrix is skipped the probe payload stands in as the raw-xz candidate
+    // and loses selection to the structural method, leaving the ratio unchanged.
+    let raw_xz_cheap_total = ZBPK_HEADER_BYTES + raw_xz_cheap_size;
+    let best_structural_total = [
+        recursive_circuit_xz_candidate_bytes,
+        monotonic_delta_candidate_bytes,
+        adaptive_transformed_xz_candidate_bytes,
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+
+    let raw_xz_matrix_timer = Instant::now();
+    let adaptive_clearly_wins = adaptive_xz_stream
+        .as_ref()
+        .is_some_and(|adaptive| adaptive.payload.len() + 1024 < raw_xz_cheap_size);
+    let structural_beats_cheap_widely = best_structural_total
+        .is_some_and(|best| best + 1024 <= raw_xz_cheap_total * 5 / 8);
+    let structural_beats_cheap = best_structural_total
+        .is_some_and(|best| best + 1024 < raw_xz_cheap_total);
+    let raw_xz_payload = if adaptive_clearly_wins {
+        context.push_skipped(
+            "raw-xz full tuning matrix skipped: adaptive-transformed-xz clearly wins"
+                .to_string(),
+        );
+        raw_xz_cheap_payload
+    } else if structural_beats_cheap_widely {
+        context.push_skipped(
+            "raw-xz full tuning matrix skipped: structural candidate beats cheap raw-xz \
+             estimate beyond any plausible tuning gain"
+                .to_string(),
+        );
+        raw_xz_cheap_payload
+    } else if structural_beats_cheap {
+        let easy9_payload = xz_encode_easy_preset(input, 9)?;
+        let easy9_total = ZBPK_HEADER_BYTES + easy9_payload.len();
+        let easy9_margin_total = easy9_total.saturating_sub(easy9_total / 16);
+        if best_structural_total.is_some_and(|best| best + 1024 <= easy9_margin_total) {
+            context.push_skipped(
+                "raw-xz full tuning matrix skipped: structural candidate beats easy XZ-9 \
+                 probe beyond the tuning-matrix margin"
+                    .to_string(),
+            );
+            if easy9_payload.len() < raw_xz_cheap_size {
+                easy9_payload
+            } else {
+                raw_xz_cheap_payload
+            }
+        } else {
+            build_raw_xz_payload(input, &mut context)?
+        }
+    } else {
+        build_raw_xz_payload(input, &mut context)?
+    };
+    raw_xz_elapsed_ms += raw_xz_matrix_timer.elapsed().as_secs_f64() * 1000.0;
+    context.timings.raw_xz_ms = raw_xz_elapsed_ms;
+    let raw_xz_candidate_bytes = Some(ZBPK_HEADER_BYTES + raw_xz_payload.len());
 
     let mut eval = PackEvaluation::new();
     eval.original_size = input.len();

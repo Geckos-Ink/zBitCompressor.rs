@@ -36,7 +36,7 @@ cargo run --bin zbit-rs
 ## Real File Benchmark
 
 ```bash
-cargo run --bin zbit-benchmark -- \
+cargo run --release --bin zbit-benchmark -- \
   ../papers/zbit-algorithmsResearch.md \
   benchmark_algorithmsResearch.zbpk \
   benchmark_latest.txt

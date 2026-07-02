@@ -19,6 +19,15 @@ path = "src/bin/benchmark_real_file.rs"
 name = "zbit-benchmark-stream"
 path = "src/bin/benchmark_stream_real_file.rs"
 
+# Dependencies carry the codec hot loops (xz2, zstd, brotli, flate2, preflate-rs), so they
+# are optimized even in dev/test builds; the workspace crate stays at a low opt level for
+# fast incremental compiles. Benchmarks always run --release (see zbit-rs/scripts/).
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [dependencies]
 brotli = "8"
 flate2 = "1.1"

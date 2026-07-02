@@ -255,7 +255,7 @@ cargo run --manifest-path zbit-rs/Cargo.toml --bin zbit-rs
 Run the real-file benchmark (defaults already target `papers/zbit-algorithmsResearch.md`):
 
 ```bash
-cargo run --manifest-path zbit-rs/Cargo.toml --bin zbit-benchmark -- \
+cargo run --release --manifest-path zbit-rs/Cargo.toml --bin zbit-benchmark -- \
   papers/zbit-algorithmsResearch.md \
   zbit-rs/benchmark_algorithmsResearch.zbpk \
   zbit-rs/benchmark_latest.txt
@@ -297,21 +297,23 @@ bash zbit-rs/scripts/benchmark_cat_challenge_stream_multilevel.sh
 
 ## Latest Benchmark Result Files
 
-Current snapshot (short reports refreshed on 2026-05-26; long cat/depth reports kept from 2026-05-23):
+Current snapshot (non-stream reports refreshed on 2026-07-02 with **release builds** — see the timing note below; stream reports kept from 2026-05-23):
 
 ### Latest Single-Run Benchmarks
 
 | Test | Input | Selected method/profile | Original -> Compressed (bytes) | Ratio | Savings | Compression ms | Decompression ms | Validation |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Paper benchmark | `papers/zbit-algorithmsResearch.md` | `raw-brotli` | `62015 -> 18573` | `0.299492` | `70.05%` | `820.075` | `8.575` | `PASS` |
-| Primary binary benchmark | `assets/primary.3b.bin` | `monotonic-delta` | `3233613 -> 562799` | `0.174046` | `82.60%` | `9803.097` | `133.500` | `PASS` |
-| Cat challenge benchmark | `assets/cat_challenge.png` | `recursive-circuit-xz` | `2969404 -> 2670571` | `0.899363` | `10.07%` | `58945.348` | `481.421` | `PASS` |
+| Paper benchmark | `papers/zbit-algorithmsResearch.md` | `raw-brotli` | `62015 -> 18573` | `0.299492` | `70.05%` | `96.723` | `1.825` | `PASS` |
+| Primary binary benchmark | `assets/primary.3b.bin` | `monotonic-delta` | `3233613 -> 562799` | `0.174046` | `82.60%` | `2716.613` | `28.765` | `PASS` |
+| Cat challenge benchmark | `assets/cat_challenge.png` | `recursive-circuit-xz` | `2969404 -> 2670567` | `0.899361` | `10.06%` | `34343.559` | `506.423` | `PASS` |
 | Cat challenge stream benchmark | `assets/cat_challenge.png` | `wide-overfit stream` | `2969404 -> 2670846` | `0.899455` | `10.05%` | `112964.407` | `8186.741` | `PASS` |
-| Depth Anything model benchmark | `assets/depth_anything_v2_vits.pth` | `adaptive-transformed-xz` | `99218434 -> 83380762` | `0.840376` | `15.96%` | `628278.163` | `236.317` | `PASS` |
+| Depth Anything model benchmark | `assets/depth_anything_v2_vits.pth` | `adaptive-transformed-xz` | `99218434 -> 83380762` | `0.840376` | `15.96%` | `359490.041` | `220.875` | `PASS` |
 
 `raw-brotli` is now available for bounded text-like inputs and moves the paper benchmark from `20561` bytes (`raw-xz`, ratio `0.331549`) to `18573` bytes (ratio `0.299492`). The candidate is gated by a cheap text-likeness check so binary corpora such as `primary.3b`, cat, and depth_anything do not pay the q11 Brotli search cost. Outer recompression of `.zbpk` artifacts was also probed: it lost on paper/primary and saved only 58 bytes on the 83 MB depth artifact with zstd, so it is documented but not promoted into the live format yet.
 
 Compression times remain substantially lower than the 2026-05-07 snapshot on the structural paths: primary `16 635 ms -> 9 803 ms`, cat `112 500 ms -> 60 747 ms`, and depth_anything `5 429 743 ms -> 628 278 ms`. Cat ratio improved slightly (`0.899412 -> 0.899361`, 151 bytes saved cumulatively across the v3 dictionary compaction). The structural-speed improvements come from (a) a cheap XZ-3 ranking pass before the expensive `choose_best_codec` evaluation, (b) a leaner per-plan winner-refinement tuning matrix, (c) a bounded framed-payload analyzer, (d) a tuned-XZ cache, and (e) a runtime gate that skips the full raw-xz tuning matrix when a cheap XZ-3 estimate plus adaptive-transformed-xz prove raw-xz cannot win.
+
+**2026-07-02 runtime pass (no ratio change, all bytes identical):** the non-stream benchmark timings above are measured with release builds — the benchmark scripts previously ran the default debug profile, which roughly doubled cat wall time (release alone: cat `94.5 s -> 51.8 s` on the same machine, identical output bytes). On top of that, four search-cost fixes landed: (a) the raw-xz tuning-matrix skip gate now also considers the structural candidates (recursive-circuit-xz, monotonic-delta), tiered by a cheap preset-3 bound and, in the borderline band, a single easy XZ-9 probe — primary and cat no longer walk the matrix at all; (b) the ~27 unconditionally forced transform-plan variants are pre-ranked on the existing cheap sample and only a profile-bounded top slice (balanced: 4) pays the full-data XZ-3 ranking encode — deep/research keep the full set; (c) the winner tuned-XZ refinement drops the extreme-preset entries on fast/balanced (they doubled refinement wall time and never beat the plain preset-9 variants on a transformed payload); (d) the prelude candidates (index/huffman/deflate/zstd/brotli/cheap-xz) run concurrently. Net effect at balanced: primary `4.8 s -> 2.7 s`, cat `51.8 s -> 34.3 s` release-to-release, depth_anything `628 s -> 359 s` (same script, both release; identical output bytes `83380762`). The `raw-xz encode` timing field previously absorbed the recursive/monotonic/adaptive build time (it reported 51 s on cat where the real matrix cost was ~1.6 s); it now reports only the cheap estimate plus the probe/matrix work. `cargo test` also got faster: dependencies (xz2, zstd, brotli, preflate-rs) are now compiled optimized in dev/test builds via a `[profile.dev.package."*"]` override.
 
 Several new tail-only reversible transforms have been added without changing tracked ratios: `periodic-head-tail-tail-row-delta` / `row-xor` / `row-up` (PNG-style Sub / XOR / Up predictors applied only to the row-data tail), `periodic-head-tail-tail-bit-plane-transpose` (with and without follow-up unary delta), plus deep-search XZ tunings (`depth=2000`/`4000`) gated to the deep / research profiles. They lose the XZ-3 ranking on the already-filtered cat PNG IDAT plain (where the simple `periodic-head-tail` still wins by ~23 KB on XZ-9) but stay available for unfiltered raster payloads where they should win cleanly.
 
