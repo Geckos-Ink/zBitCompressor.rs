@@ -398,6 +398,560 @@ fn decode_adaptive_transformed_xz_payload(
     Ok(recovered)
 }
 
+fn encode_atlas_indices(indices: &[usize], unique_count: usize) -> Vec<u8> {
+    let width = bits_for_index(unique_count);
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut writer = BitWriter::with_capacity((indices.len() * width as usize + 7) / 8);
+    for &idx in indices {
+        writer.write_bits(idx as u64, width);
+    }
+    writer.into_bytes()
+}
+
+fn exact_block_atlas_dictionary_size(stream: &ExactBlockAtlasStream) -> usize {
+    1 + varint_u64_len(stream.chunk_size as u64)
+        + varint_u64_len(stream.block_count as u64)
+        + varint_u64_len(stream.tail_len as u64)
+        + varint_u64_len(stream.unique_count as u64)
+        + varint_u64_len(stream.unique_payload.len() as u64)
+        + varint_u64_len(stream.index_plain_len as u64)
+        + varint_u64_len(stream.index_payload.len() as u64)
+        + varint_u64_len(stream.tail_payload.len() as u64)
+}
+
+fn write_exact_block_atlas_dictionary(out: &mut Vec<u8>, stream: &ExactBlockAtlasStream) {
+    let codecs = (stream.unique_codec.as_u8() & 0x03)
+        | ((stream.index_codec.as_u8() & 0x03) << 2)
+        | ((stream.tail_codec.as_u8() & 0x03) << 4);
+    out.push(codecs);
+    push_varint_u64(out, stream.chunk_size as u64);
+    push_varint_u64(out, stream.block_count as u64);
+    push_varint_u64(out, stream.tail_len as u64);
+    push_varint_u64(out, stream.unique_count as u64);
+    push_varint_u64(out, stream.unique_payload.len() as u64);
+    push_varint_u64(out, stream.index_plain_len as u64);
+    push_varint_u64(out, stream.index_payload.len() as u64);
+    push_varint_u64(out, stream.tail_payload.len() as u64);
+}
+
+fn build_exact_block_atlas_for_chunk_size(
+    input: &[u8],
+    chunk_size: usize,
+    context: &mut CompressionContext,
+    best_prelude_candidate_bytes: Option<usize>,
+) -> ZbitResult<Option<(ExactBlockAtlasStream, usize)>> {
+    if input.len() < chunk_size * 4 {
+        return Ok(None);
+    }
+
+    let block_count = input.len() / chunk_size;
+    let tail_len = input.len() - block_count * chunk_size;
+    if block_count < 4 {
+        return Ok(None);
+    }
+
+    let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
+    let mut unique_ranges: Vec<(usize, usize)> = Vec::new();
+    let mut indices = Vec::with_capacity(block_count);
+    for block_idx in 0..block_count {
+        let start = block_idx * chunk_size;
+        let end = start + chunk_size;
+        let slice = &input[start..end];
+        let hash = xxh3_64(slice);
+        let existing = buckets
+            .get(&hash)
+            .and_then(|ids| {
+                ids.iter().copied().find(|&id| {
+                    let (unique_start, unique_end) = unique_ranges[id];
+                    input[unique_start..unique_end] == slice[..]
+                })
+            });
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let id = unique_ranges.len();
+                unique_ranges.push((start, end));
+                buckets.entry(hash).or_default().push(id);
+                id
+            }
+        };
+        indices.push(id);
+    }
+
+    let unique_count = unique_ranges.len();
+    if unique_count >= block_count {
+        return Ok(None);
+    }
+    let repeated_blocks = block_count - unique_count;
+    if repeated_blocks < 2 {
+        return Ok(None);
+    }
+
+    let index_plain = encode_atlas_indices(&indices, unique_count);
+    let unique_plain_len = unique_count * chunk_size;
+    let raw_model_size = unique_plain_len + index_plain.len() + tail_len;
+    if let Some(best_prelude_total) = best_prelude_candidate_bytes {
+        let estimated_total = ZBPK_HEADER_BYTES
+            + 16
+            + varint_u64_len(chunk_size as u64)
+            + varint_u64_len(block_count as u64)
+            + varint_u64_len(unique_count as u64)
+            + raw_model_size;
+        if estimated_total + 1024 >= best_prelude_total {
+            return Ok(None);
+        }
+    }
+
+    let mut unique_plain = Vec::with_capacity(unique_plain_len);
+    for (start, end) in unique_ranges {
+        unique_plain.extend_from_slice(&input[start..end]);
+    }
+    let tail_plain = if tail_len == 0 {
+        Vec::new()
+    } else {
+        input[input.len() - tail_len..].to_vec()
+    };
+
+    let (unique_codec, unique_payload) =
+        choose_best_codec_cached(&unique_plain, false, true, context)?;
+    let (index_codec, index_payload) = if index_plain.is_empty() {
+        (PayloadCodec::Raw, Vec::new())
+    } else {
+        choose_best_codec_cached(&index_plain, true, false, context)?
+    };
+    let (tail_codec, tail_payload) = if tail_plain.is_empty() {
+        (PayloadCodec::Raw, Vec::new())
+    } else {
+        choose_best_codec_cached(&tail_plain, true, true, context)?
+    };
+
+    let stream = ExactBlockAtlasStream {
+        chunk_size,
+        block_count,
+        tail_len,
+        unique_count,
+        index_plain_len: index_plain.len(),
+        unique_codec,
+        index_codec,
+        tail_codec,
+        unique_payload,
+        index_payload,
+        tail_payload,
+    };
+    let total_size = ZBPK_HEADER_BYTES
+        + exact_block_atlas_dictionary_size(&stream)
+        + stream.unique_payload.len()
+        + stream.index_payload.len()
+        + stream.tail_payload.len();
+    Ok(Some((stream, total_size)))
+}
+
+fn build_exact_block_atlas_stream(
+    input: &[u8],
+    context: &mut CompressionContext,
+    best_prelude_candidate_bytes: Option<usize>,
+) -> ZbitResult<Option<ExactBlockAtlasStream>> {
+    let mut best: Option<(ExactBlockAtlasStream, usize)> = None;
+    for chunk_size in [1024usize, 4096, 16 * 1024, 64 * 1024] {
+        if let Some(candidate) = build_exact_block_atlas_for_chunk_size(
+            input,
+            chunk_size,
+            context,
+            best_prelude_candidate_bytes,
+        )? {
+            match &best {
+                Some((_, best_size)) if *best_size <= candidate.1 => {}
+                _ => best = Some(candidate),
+            }
+        }
+    }
+
+    let Some((stream, total_size)) = best else {
+        context.push_skipped(
+            "exact-block-atlas skipped: no repeated fixed-size block layout passed the cost gate",
+        );
+        return Ok(None);
+    };
+    if let Some(best_prelude_total) = best_prelude_candidate_bytes {
+        if total_size >= best_prelude_total {
+            context.push_skipped(format!(
+                "exact-block-atlas rejected: total {total_size} does not beat best prelude total {best_prelude_total}"
+            ));
+            return Ok(None);
+        }
+    }
+    Ok(Some(stream))
+}
+
+fn decode_exact_block_atlas_payload(
+    dict_bytes: &[u8],
+    payload: &[u8],
+    original_size: usize,
+) -> ZbitResult<Vec<u8>> {
+    let mut cursor = 0usize;
+    let codecs = read_u8(dict_bytes, &mut cursor)?;
+    if codecs & 0xC0 != 0 {
+        return Err(ZbitError::Parse(
+            "exact-block-atlas codec byte reserves top 2 bits".to_string(),
+        ));
+    }
+    let unique_codec = PayloadCodec::from_u8(codecs & 0x03).ok_or_else(|| {
+        ZbitError::Parse("exact-block-atlas has invalid unique codec".to_string())
+    })?;
+    let index_codec = PayloadCodec::from_u8((codecs >> 2) & 0x03).ok_or_else(|| {
+        ZbitError::Parse("exact-block-atlas has invalid index codec".to_string())
+    })?;
+    let tail_codec = PayloadCodec::from_u8((codecs >> 4) & 0x03).ok_or_else(|| {
+        ZbitError::Parse("exact-block-atlas has invalid tail codec".to_string())
+    })?;
+    let chunk_size = read_varint_u64(dict_bytes, &mut cursor)? as usize;
+    let block_count = read_varint_u64(dict_bytes, &mut cursor)? as usize;
+    let tail_len = read_varint_u64(dict_bytes, &mut cursor)? as usize;
+    let unique_count = read_varint_u64(dict_bytes, &mut cursor)? as usize;
+    let unique_payload_len = read_varint_u64(dict_bytes, &mut cursor)? as usize;
+    let index_plain_len = read_varint_u64(dict_bytes, &mut cursor)? as usize;
+    let index_payload_len = read_varint_u64(dict_bytes, &mut cursor)? as usize;
+    let tail_payload_len = read_varint_u64(dict_bytes, &mut cursor)? as usize;
+    if cursor != dict_bytes.len() {
+        return Err(ZbitError::Parse(
+            "trailing bytes in exact-block-atlas dictionary".to_string(),
+        ));
+    }
+    if chunk_size == 0 || block_count == 0 || unique_count == 0 || unique_count > block_count {
+        return Err(ZbitError::Parse(
+            "exact-block-atlas has invalid chunk/block counters".to_string(),
+        ));
+    }
+    let full_len = block_count.checked_mul(chunk_size).ok_or_else(|| {
+        ZbitError::Parse("exact-block-atlas full-block length overflow".to_string())
+    })?;
+    if full_len.checked_add(tail_len) != Some(original_size) {
+        return Err(ZbitError::Parse(format!(
+            "exact-block-atlas output length mismatch: expected {original_size}"
+        )));
+    }
+    let unique_plain_len = unique_count.checked_mul(chunk_size).ok_or_else(|| {
+        ZbitError::Parse("exact-block-atlas unique length overflow".to_string())
+    })?;
+    let expected_index_plain_len =
+        (block_count * bits_for_index(unique_count) as usize + 7) / 8;
+    if index_plain_len != expected_index_plain_len {
+        return Err(ZbitError::Parse(
+            "exact-block-atlas index length does not match block/index width".to_string(),
+        ));
+    }
+
+    let unique_end = unique_payload_len;
+    let index_end = unique_end.checked_add(index_payload_len).ok_or_else(|| {
+        ZbitError::Parse("exact-block-atlas payload length overflow".to_string())
+    })?;
+    let tail_end = index_end.checked_add(tail_payload_len).ok_or_else(|| {
+        ZbitError::Parse("exact-block-atlas payload length overflow".to_string())
+    })?;
+    if tail_end != payload.len() {
+        return Err(ZbitError::Parse(
+            "exact-block-atlas payload section lengths do not match payload".to_string(),
+        ));
+    }
+    let unique_plain = decode_with_codec(&payload[..unique_end], unique_codec, unique_plain_len)?;
+    let index_plain =
+        decode_with_codec(&payload[unique_end..index_end], index_codec, index_plain_len)?;
+    let tail_plain = decode_with_codec(&payload[index_end..tail_end], tail_codec, tail_len)?;
+
+    let index_width = bits_for_index(unique_count);
+    let mut reader = BitReader::new(&index_plain);
+    let mut out = Vec::with_capacity(original_size);
+    for _ in 0..block_count {
+        let id = if index_width == 0 {
+            0usize
+        } else {
+            reader.read_bits(index_width)? as usize
+        };
+        if id >= unique_count {
+            return Err(ZbitError::Parse(
+                "exact-block-atlas index references unknown chunk".to_string(),
+            ));
+        }
+        let start = id * chunk_size;
+        let end = start + chunk_size;
+        out.extend_from_slice(&unique_plain[start..end]);
+    }
+    out.extend_from_slice(&tail_plain);
+    if out.len() != original_size {
+        return Err(ZbitError::Parse(format!(
+            "exact-block-atlas output length mismatch: expected {original_size} got {}",
+            out.len()
+        )));
+    }
+    Ok(out)
+}
+
+fn read_le_u16_at(data: &[u8], offset: usize) -> Option<u16> {
+    let bytes = data.get(offset..offset + 2)?;
+    Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+fn read_le_u32_at(data: &[u8], offset: usize) -> Option<u32> {
+    let bytes = data.get(offset..offset + 4)?;
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn parse_stored_zip_tensor_ranges(input: &[u8]) -> Vec<(usize, usize)> {
+    const LOCAL_FILE_HEADER: u32 = 0x0403_4B50;
+    const CENTRAL_DIRECTORY_HEADER: u32 = 0x0201_4B50;
+    const END_OF_CENTRAL_DIRECTORY: u32 = 0x0605_4B50;
+    const DATA_DESCRIPTOR_FLAG: u16 = 1 << 3;
+    const STORED_METHOD: u16 = 0;
+
+    let mut cursor = 0usize;
+    let mut ranges = Vec::new();
+    while cursor + 30 <= input.len() {
+        let Some(signature) = read_le_u32_at(input, cursor) else {
+            break;
+        };
+        if signature == CENTRAL_DIRECTORY_HEADER || signature == END_OF_CENTRAL_DIRECTORY {
+            break;
+        }
+        if signature != LOCAL_FILE_HEADER {
+            return Vec::new();
+        }
+        let flags = read_le_u16_at(input, cursor + 6).unwrap_or(0);
+        let method = read_le_u16_at(input, cursor + 8).unwrap_or(u16::MAX);
+        let compressed_size = read_le_u32_at(input, cursor + 18).unwrap_or(u32::MAX) as usize;
+        let uncompressed_size = read_le_u32_at(input, cursor + 22).unwrap_or(u32::MAX) as usize;
+        let name_len = read_le_u16_at(input, cursor + 26).unwrap_or(0) as usize;
+        let extra_len = read_le_u16_at(input, cursor + 28).unwrap_or(0) as usize;
+        let name_start = cursor + 30;
+        let data_start = match name_start
+            .checked_add(name_len)
+            .and_then(|value| value.checked_add(extra_len))
+        {
+            Some(value) => value,
+            None => return Vec::new(),
+        };
+        let data_end = match data_start.checked_add(compressed_size) {
+            Some(value) if value <= input.len() => value,
+            _ => return Vec::new(),
+        };
+        let name = std::str::from_utf8(input.get(name_start..name_start + name_len).unwrap_or(&[]))
+            .unwrap_or("");
+        let is_tensor_storage = name.contains("/data/") || name.starts_with("data/");
+        if flags & DATA_DESCRIPTOR_FLAG == 0
+            && method == STORED_METHOD
+            && compressed_size == uncompressed_size
+            && compressed_size >= 4096
+            && is_tensor_storage
+        {
+            ranges.push((data_start, compressed_size));
+        }
+        cursor = data_end;
+    }
+    ranges
+}
+
+fn zip_tensor_split_dictionary_size(stream: &ZipTensorSplitStream) -> usize {
+    let ranges = stream.data_lengths.len();
+    1 + varint_u64_len(ranges as u64)
+        + varint_u64_len(stream.metadata_plain_len as u64)
+        + varint_u64_len(stream.tensor_plain_len as u64)
+        + varint_u64_len(stream.metadata_payload.len() as u64)
+        + varint_u64_len(stream.tensor_payload.len() as u64)
+        + stream
+            .gap_lengths
+            .iter()
+            .map(|&len| varint_u64_len(len as u64))
+            .sum::<usize>()
+        + stream
+            .data_lengths
+            .iter()
+            .map(|&len| varint_u64_len(len as u64))
+            .sum::<usize>()
+}
+
+fn write_zip_tensor_split_dictionary(out: &mut Vec<u8>, stream: &ZipTensorSplitStream) {
+    let codecs = (stream.metadata_codec.as_u8() & 0x03) | ((stream.tensor_codec.as_u8() & 0x03) << 2);
+    out.push(codecs);
+    push_varint_u64(out, stream.data_lengths.len() as u64);
+    push_varint_u64(out, stream.metadata_plain_len as u64);
+    push_varint_u64(out, stream.tensor_plain_len as u64);
+    push_varint_u64(out, stream.metadata_payload.len() as u64);
+    push_varint_u64(out, stream.tensor_payload.len() as u64);
+    for idx in 0..stream.data_lengths.len() {
+        push_varint_u64(out, stream.gap_lengths[idx] as u64);
+        push_varint_u64(out, stream.data_lengths[idx] as u64);
+    }
+    push_varint_u64(out, *stream.gap_lengths.last().unwrap_or(&0) as u64);
+}
+
+fn build_zip_tensor_split_stream(
+    input: &[u8],
+    context: &mut CompressionContext,
+    best_prelude_candidate_bytes: Option<usize>,
+) -> ZbitResult<Option<ZipTensorSplitStream>> {
+    if input.len() < 128 * 1024 {
+        context.push_skipped("zip-tensor-split skipped: input below container-model threshold");
+        return Ok(None);
+    }
+    let ranges = parse_stored_zip_tensor_ranges(input);
+    if ranges.len() < 2 {
+        context.push_skipped(
+            "zip-tensor-split skipped: no multi-entry stored tensor ZIP layout detected",
+        );
+        return Ok(None);
+    }
+
+    let tensor_plain_len = ranges.iter().map(|(_, len)| *len).sum::<usize>();
+    if tensor_plain_len < 128 * 1024 {
+        context.push_skipped("zip-tensor-split skipped: tensor payload below threshold");
+        return Ok(None);
+    }
+
+    let mut metadata = Vec::with_capacity(input.len() - tensor_plain_len);
+    let mut tensor = Vec::with_capacity(tensor_plain_len);
+    let mut gap_lengths = Vec::with_capacity(ranges.len() + 1);
+    let mut data_lengths = Vec::with_capacity(ranges.len());
+    let mut cursor = 0usize;
+    for (start, len) in ranges {
+        let end = start + len;
+        if start < cursor || end > input.len() {
+            return Ok(None);
+        }
+        gap_lengths.push(start - cursor);
+        metadata.extend_from_slice(&input[cursor..start]);
+        tensor.extend_from_slice(&input[start..end]);
+        data_lengths.push(len);
+        cursor = end;
+    }
+    gap_lengths.push(input.len() - cursor);
+    metadata.extend_from_slice(&input[cursor..]);
+
+    let raw_model_size = metadata.len() + tensor.len();
+    if let Some(best_prelude_total) = best_prelude_candidate_bytes {
+        if ZBPK_HEADER_BYTES + raw_model_size + 32 >= best_prelude_total {
+            context.push_skipped(
+                "zip-tensor-split skipped: raw metadata/tensor split cannot beat prelude bound",
+            );
+            return Ok(None);
+        }
+    }
+
+    let (metadata_codec, metadata_payload) =
+        choose_best_codec_cached(&metadata, true, true, context)?;
+    let (tensor_codec, tensor_payload) = choose_best_codec_cached(&tensor, false, true, context)?;
+    let stream = ZipTensorSplitStream {
+        gap_lengths,
+        data_lengths,
+        metadata_plain_len: metadata.len(),
+        tensor_plain_len: tensor.len(),
+        metadata_codec,
+        tensor_codec,
+        metadata_payload,
+        tensor_payload,
+    };
+    let total_size = ZBPK_HEADER_BYTES
+        + zip_tensor_split_dictionary_size(&stream)
+        + stream.metadata_payload.len()
+        + stream.tensor_payload.len();
+    if let Some(best_prelude_total) = best_prelude_candidate_bytes {
+        if total_size >= best_prelude_total {
+            context.push_skipped(format!(
+                "zip-tensor-split rejected: total {total_size} does not beat best prelude total {best_prelude_total}"
+            ));
+            return Ok(None);
+        }
+    }
+    Ok(Some(stream))
+}
+
+fn decode_zip_tensor_split_payload(
+    dict_bytes: &[u8],
+    payload: &[u8],
+    original_size: usize,
+) -> ZbitResult<Vec<u8>> {
+    let mut cursor = 0usize;
+    let codecs = read_u8(dict_bytes, &mut cursor)?;
+    if codecs & 0xF0 != 0 {
+        return Err(ZbitError::Parse(
+            "zip-tensor-split codec byte reserves top 4 bits".to_string(),
+        ));
+    }
+    let metadata_codec = PayloadCodec::from_u8(codecs & 0x03).ok_or_else(|| {
+        ZbitError::Parse("zip-tensor-split has invalid metadata codec".to_string())
+    })?;
+    let tensor_codec = PayloadCodec::from_u8((codecs >> 2) & 0x03).ok_or_else(|| {
+        ZbitError::Parse("zip-tensor-split has invalid tensor codec".to_string())
+    })?;
+    let range_count = read_varint_u64(dict_bytes, &mut cursor)? as usize;
+    let metadata_plain_len = read_varint_u64(dict_bytes, &mut cursor)? as usize;
+    let tensor_plain_len = read_varint_u64(dict_bytes, &mut cursor)? as usize;
+    let metadata_payload_len = read_varint_u64(dict_bytes, &mut cursor)? as usize;
+    let tensor_payload_len = read_varint_u64(dict_bytes, &mut cursor)? as usize;
+    if range_count == 0 {
+        return Err(ZbitError::Parse(
+            "zip-tensor-split requires at least one tensor range".to_string(),
+        ));
+    }
+    let mut gap_lengths = Vec::with_capacity(range_count + 1);
+    let mut data_lengths = Vec::with_capacity(range_count);
+    for _ in 0..range_count {
+        gap_lengths.push(read_varint_u64(dict_bytes, &mut cursor)? as usize);
+        data_lengths.push(read_varint_u64(dict_bytes, &mut cursor)? as usize);
+    }
+    gap_lengths.push(read_varint_u64(dict_bytes, &mut cursor)? as usize);
+    if cursor != dict_bytes.len() {
+        return Err(ZbitError::Parse(
+            "trailing bytes in zip-tensor-split dictionary".to_string(),
+        ));
+    }
+    if metadata_payload_len.checked_add(tensor_payload_len) != Some(payload.len()) {
+        return Err(ZbitError::Parse(
+            "zip-tensor-split payload lengths do not match payload".to_string(),
+        ));
+    }
+
+    let metadata = decode_with_codec(
+        &payload[..metadata_payload_len],
+        metadata_codec,
+        metadata_plain_len,
+    )?;
+    let tensor = decode_with_codec(
+        &payload[metadata_payload_len..],
+        tensor_codec,
+        tensor_plain_len,
+    )?;
+    if gap_lengths.iter().sum::<usize>() != metadata_plain_len
+        || data_lengths.iter().sum::<usize>() != tensor_plain_len
+        || metadata_plain_len.checked_add(tensor_plain_len) != Some(original_size)
+    {
+        return Err(ZbitError::Parse(
+            "zip-tensor-split dictionary lengths do not match original size".to_string(),
+        ));
+    }
+
+    let mut out = Vec::with_capacity(original_size);
+    let mut metadata_cursor = 0usize;
+    let mut tensor_cursor = 0usize;
+    for idx in 0..range_count {
+        let gap_len = gap_lengths[idx];
+        out.extend_from_slice(&metadata[metadata_cursor..metadata_cursor + gap_len]);
+        metadata_cursor += gap_len;
+        let data_len = data_lengths[idx];
+        out.extend_from_slice(&tensor[tensor_cursor..tensor_cursor + data_len]);
+        tensor_cursor += data_len;
+    }
+    let final_gap = *gap_lengths.last().unwrap_or(&0);
+    out.extend_from_slice(&metadata[metadata_cursor..metadata_cursor + final_gap]);
+    if out.len() != original_size {
+        return Err(ZbitError::Parse(format!(
+            "zip-tensor-split output length mismatch: expected {original_size} got {}",
+            out.len()
+        )));
+    }
+    Ok(out)
+}
+
 fn write_monotonic_delta_dictionary(out: &mut Vec<u8>, stream: &MonotonicDeltaStream) {
     // width ∈ 1..=8 stored as `width - 1` in 3 bits; mode in 3 bits; codec in 2 bits.
     debug_assert!(stream.width >= 1 && stream.width <= 8);
@@ -953,6 +1507,132 @@ fn xz_encode_easy_preset(data: &[u8], preset: u32) -> ZbitResult<Vec<u8>> {
         .map_err(|e| ZbitError::Io(format!("xz easy encode finish failed: {e}")))
 }
 
+const LZMA_FILTER_DELTA: lzma_sys::lzma_vli = 0x03;
+const LZMA_DELTA_TYPE_BYTE: lzma_sys::__enum_ty = 0;
+
+#[repr(C)]
+struct LzmaOptionsDelta {
+    delta_type: lzma_sys::__enum_ty,
+    dist: u32,
+    reserved_int1: u32,
+    reserved_int2: u32,
+    reserved_int3: u32,
+    reserved_int4: u32,
+    reserved_ptr1: *mut std::ffi::c_void,
+    reserved_ptr2: *mut std::ffi::c_void,
+}
+
+fn lzma_ret_label(code: lzma_sys::lzma_ret) -> &'static str {
+    match code {
+        lzma_sys::LZMA_OK => "LZMA_OK",
+        lzma_sys::LZMA_STREAM_END => "LZMA_STREAM_END",
+        lzma_sys::LZMA_MEM_ERROR => "LZMA_MEM_ERROR",
+        lzma_sys::LZMA_MEMLIMIT_ERROR => "LZMA_MEMLIMIT_ERROR",
+        lzma_sys::LZMA_OPTIONS_ERROR => "LZMA_OPTIONS_ERROR",
+        lzma_sys::LZMA_PROG_ERROR => "LZMA_PROG_ERROR",
+        _ => "LZMA_ERROR",
+    }
+}
+
+fn lzma_mode_from_xz2(mode: Mode) -> lzma_sys::lzma_mode {
+    match mode {
+        Mode::Fast => lzma_sys::LZMA_MODE_FAST,
+        Mode::Normal => lzma_sys::LZMA_MODE_NORMAL,
+    }
+}
+
+fn lzma_match_finder_from_xz2(match_finder: MatchFinder) -> lzma_sys::lzma_match_finder {
+    match match_finder {
+        MatchFinder::HashChain3 => lzma_sys::LZMA_MF_HC3,
+        MatchFinder::HashChain4 => lzma_sys::LZMA_MF_HC4,
+        MatchFinder::BinaryTree2 => lzma_sys::LZMA_MF_BT2,
+        MatchFinder::BinaryTree3 => lzma_sys::LZMA_MF_BT3,
+        MatchFinder::BinaryTree4 => lzma_sys::LZMA_MF_BT4,
+    }
+}
+
+fn xz_encode_with_delta_tuning(
+    data: &[u8],
+    preset: u32,
+    tuning: XzTuningParams,
+) -> ZbitResult<Vec<u8>> {
+    if !(1..=256).contains(&tuning.delta_dist) {
+        return Err(ZbitError::Internal(format!(
+            "LZMA delta distance {} is outside 1..=256",
+            tuning.delta_dist
+        )));
+    }
+
+    // SAFETY: liblzma initializes the option structs and writes only within the output
+    // buffer bound returned by lzma_stream_buffer_bound. The filter option structs live
+    // until lzma_stream_buffer_encode returns, and the filter array is terminated with
+    // LZMA_VLI_UNKNOWN as required by the C API.
+    unsafe {
+        let mut lzma_options: lzma_sys::lzma_options_lzma = std::mem::zeroed();
+        let preset_failed = lzma_sys::lzma_lzma_preset(&mut lzma_options, preset);
+        if preset_failed != 0 {
+            return Err(ZbitError::Io(format!(
+                "lzma-sys preset init failed for preset {preset}"
+            )));
+        }
+        lzma_options.dict_size = tuning.dict_size;
+        lzma_options.lc = tuning.literal_context_bits;
+        lzma_options.lp = tuning.literal_position_bits;
+        lzma_options.pb = tuning.position_bits;
+        lzma_options.mode = lzma_mode_from_xz2(tuning.mode);
+        lzma_options.nice_len = tuning.nice_len;
+        lzma_options.mf = lzma_match_finder_from_xz2(tuning.match_finder);
+        lzma_options.depth = tuning.depth;
+
+        let mut delta_options = LzmaOptionsDelta {
+            delta_type: LZMA_DELTA_TYPE_BYTE,
+            dist: tuning.delta_dist,
+            reserved_int1: 0,
+            reserved_int2: 0,
+            reserved_int3: 0,
+            reserved_int4: 0,
+            reserved_ptr1: std::ptr::null_mut(),
+            reserved_ptr2: std::ptr::null_mut(),
+        };
+        let mut filters = [
+            lzma_sys::lzma_filter {
+                id: LZMA_FILTER_DELTA,
+                options: (&mut delta_options as *mut LzmaOptionsDelta).cast(),
+            },
+            lzma_sys::lzma_filter {
+                id: lzma_sys::LZMA_FILTER_LZMA2,
+                options: (&mut lzma_options as *mut lzma_sys::lzma_options_lzma).cast(),
+            },
+            lzma_sys::lzma_filter {
+                id: lzma_sys::LZMA_VLI_UNKNOWN,
+                options: std::ptr::null_mut(),
+            },
+        ];
+
+        let bound = lzma_sys::lzma_stream_buffer_bound(data.len());
+        let mut out = vec![0u8; bound];
+        let mut out_pos = 0usize;
+        let ret = lzma_sys::lzma_stream_buffer_encode(
+            filters.as_mut_ptr(),
+            lzma_sys::LZMA_CHECK_NONE,
+            std::ptr::null(),
+            data.as_ptr(),
+            data.len(),
+            out.as_mut_ptr(),
+            &mut out_pos,
+            out.len(),
+        );
+        if ret != lzma_sys::LZMA_OK {
+            return Err(ZbitError::Io(format!(
+                "lzma-sys delta+xz encode failed: {} ({ret})",
+                lzma_ret_label(ret)
+            )));
+        }
+        out.truncate(out_pos);
+        Ok(out)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct XzTuningParams {
     literal_context_bits: u32,
@@ -988,6 +1668,10 @@ fn xz_encode_with_tuning(
     preset: u32,
     tuning: XzTuningParams,
 ) -> ZbitResult<Vec<u8>> {
+    if tuning.delta_dist != 0 {
+        return xz_encode_with_delta_tuning(data, preset, tuning);
+    }
+
     let mut options = LzmaOptions::new_preset(preset)
         .map_err(|e| ZbitError::Io(format!("xz options preset init failed: {e}")))?;
     options.dict_size(tuning.dict_size);
@@ -1000,10 +1684,6 @@ fn xz_encode_with_tuning(
     options.depth(tuning.depth);
 
     let mut filters = Filters::new();
-    // The xz2 binding does not currently expose the LZMA delta filter; tunings that request a
-    // delta distance fall back to plain LZMA2. When the upstream binding adds .delta(dist) we
-    // can flip this back on without further changes elsewhere in the matrix.
-    let _ = tuning.delta_dist;
     filters.lzma2(&options);
 
     let stream = Stream::new_stream_encoder(&filters, Check::None)
@@ -1321,6 +2001,17 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
             match_finder: MatchFinder::BinaryTree4,
             mode: Mode::Normal,
             depth: 0,
+            delta_dist: 8,
+        },
+        XzTuningParams {
+            literal_context_bits: 3,
+            literal_position_bits: 0,
+            position_bits: 0,
+            dict_size: 64 * 1024 * 1024,
+            nice_len: 273,
+            match_finder: MatchFinder::BinaryTree4,
+            mode: Mode::Normal,
+            depth: 0,
             delta_dist: 3,
         },
         XzTuningParams {
@@ -1348,6 +2039,60 @@ fn tuned_xz_param_matrix() -> Vec<XzTuningParams> {
     ]
 }
 
+fn average_abs_byte_delta(data: &[u8], distance: usize, stride: usize) -> Option<f64> {
+    if distance == 0 || data.len() <= distance {
+        return None;
+    }
+    let stride = stride.max(1);
+    let mut sum = 0u64;
+    let mut count = 0u64;
+    let mut idx = distance;
+    while idx < data.len() {
+        let a = data[idx] as i16;
+        let b = data[idx - distance] as i16;
+        sum += (a - b).unsigned_abs() as u64;
+        count += 1;
+        idx = idx.saturating_add(stride);
+    }
+    if count == 0 {
+        None
+    } else {
+        Some(sum as f64 / count as f64)
+    }
+}
+
+fn eligible_delta_distances(data: &[u8], profile: CompressionProfile) -> Vec<u32> {
+    if matches!(profile, CompressionProfile::Fast) || data.len() < 64 * 1024 {
+        return Vec::new();
+    }
+
+    let sample_stride = (data.len() / (512 * 1024)).max(1);
+    let baseline = average_abs_byte_delta(data, 251, sample_stride)
+        .or_else(|| average_abs_byte_delta(data, 127, sample_stride))
+        .unwrap_or(64.0);
+    let mut scored = [1usize, 2, 3, 4, 8]
+        .into_iter()
+        .filter_map(|distance| {
+            let avg = average_abs_byte_delta(data, distance, sample_stride)?;
+            // Admit only when the same-distance residual is clearly structured. The absolute
+            // threshold catches smooth byte streams; the relative threshold catches noisier
+            // structured payloads whose far-lag residual is much worse.
+            if avg <= 18.0 || avg * 4.0 <= baseline * 3.0 {
+                Some((distance as u32, avg))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|(dist_a, avg_a), (dist_b, avg_b)| {
+        avg_a
+            .partial_cmp(avg_b)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| dist_a.cmp(dist_b))
+    });
+    scored.into_iter().map(|(distance, _)| distance).collect()
+}
+
 fn tuned_xz_budget(profile: CompressionProfile) -> (usize, usize) {
     // (normal_budget, extreme_budget): controls how many entries of tuned_xz_param_matrix() are
     // probed at preset 9 and at preset 9 + extreme flag. The matrix is sorted from
@@ -1364,9 +2109,12 @@ fn tuned_xz_budget(profile: CompressionProfile) -> (usize, usize) {
 }
 
 fn delta_xz_budget(_profile: CompressionProfile) -> (usize, usize) {
-    // Disabled until the xz2 binding exposes the LZMA delta filter; without it, the delta-marked
-    // tuning entries would duplicate plain LZMA2 work and waste eval budget.
-    (0, 0)
+    match _profile {
+        CompressionProfile::Fast => (0, 0),
+        CompressionProfile::Balanced => (2, 0),
+        CompressionProfile::Deep => (4, 2),
+        CompressionProfile::Research => (5, 3),
+    }
 }
 
 fn deep_search_xz_budget(profile: CompressionProfile) -> (usize, usize) {
@@ -1389,6 +2137,7 @@ fn deep_search_xz_budget(profile: CompressionProfile) -> (usize, usize) {
 fn build_tuned_xz_candidates(
     profile: CompressionProfile,
     allow_xz_extreme: bool,
+    delta_distances: &[u32],
 ) -> Vec<XzCodecCandidate> {
     let (normal_budget, extreme_budget) = tuned_xz_budget(profile);
     let (normal_delta_budget, extreme_delta_budget) = delta_xz_budget(profile);
@@ -1442,7 +2191,20 @@ fn build_tuned_xz_candidates(
         rank += 1;
     }
 
-    for params in tuning.iter().copied().skip(delta_first_idx).take(normal_delta_budget) {
+    let mut delta_params = tuning
+        .iter()
+        .copied()
+        .skip(delta_first_idx)
+        .filter(|entry| delta_distances.contains(&entry.delta_dist))
+        .collect::<Vec<_>>();
+    delta_params.sort_by_key(|entry| {
+        delta_distances
+            .iter()
+            .position(|&distance| distance == entry.delta_dist)
+            .unwrap_or(delta_distances.len())
+    });
+
+    for params in delta_params.iter().copied().take(normal_delta_budget) {
         out.push(XzCodecCandidate {
             rank,
             codec: PayloadCodec::Xz,
@@ -1488,12 +2250,7 @@ fn build_tuned_xz_candidates(
             rank += 1;
         }
 
-        for params in tuning
-            .iter()
-            .copied()
-            .skip(delta_first_idx)
-            .take(extreme_delta_budget)
-        {
+        for params in delta_params.iter().copied().take(extreme_delta_budget) {
             out.push(XzCodecCandidate {
                 rank,
                 codec: PayloadCodec::XzExtreme,
@@ -1512,7 +2269,8 @@ fn choose_best_tuned_xz_candidate(
     profile: CompressionProfile,
     allow_xz_extreme: bool,
 ) -> ZbitResult<Option<(PayloadCodec, Vec<u8>)>> {
-    let candidates = build_tuned_xz_candidates(profile, allow_xz_extreme);
+    let delta_distances = eligible_delta_distances(data, profile);
+    let candidates = build_tuned_xz_candidates(profile, allow_xz_extreme, &delta_distances);
     if candidates.is_empty() {
         return Ok(None);
     }

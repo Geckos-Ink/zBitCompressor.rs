@@ -323,9 +323,13 @@ The N3 multi-block recursive-circuit path is also landed (deep/research only): t
 
 A new top-level pack method `adaptive-transformed-xz` brings the same reversible-transform search to inputs that are *not* framed deflate (e.g. PyTorch `.pth` model files, raw float-tensor dumps). It runs `choose_adaptive_transform_plan` on the raw input, encodes the best transformed payload with the full codec/tuned-XZ selection, and stores a small 18-byte dictionary `(transform_kind, period, head, codec, plain_len)` so the decoder can invert the transform deterministically. Two cost gates keep it bounded: skip when recursive-circuit-xz already covers the same search; skip when raw-xz already compresses to ≤ 0.30 of the input (already-strong corpora like `primary.3b.bin`). A 128 KiB size threshold keeps small text files out of the plan search. On the new `depth_anything_v2_vits.pth` corpus it wins by **~7 MB (~7.8 %)** vs raw-xz alone: raw-xz `90 414 940 → 83 380 790` adaptive-transformed-xz, final ratio `0.840376` on 99 218 434 input bytes.
 
-### ZBPK v4/v5: bit-wise dictionaries plus structural method slots
+`lzma-sys` delta-filter support is now wired into the tuned-XZ matrix. Delta candidates are admitted only when a cheap sampled byte-autocorrelation scan finds a strong distance in `{1,2,3,4,8}`, so balanced runs do not pay unconditional extra XZ encodes. The output is still a normal XZ stream and decodes through the existing XZ decoder.
 
-The on-disk format is now **ZBPK v4**. v3 rebuilt every dictionary section under the same rule the topology bit-packing introduced: spend only the bits each enumeration value or magnitude actually needs, never a whole byte for a single bit of state. v4 keeps that layout and uses another reserved 4-bit method slot for `raw-brotli`, a no-dictionary payload method for text-heavy inputs:
+ZBPK v6 adds two general structural candidates. `exact-block-atlas` is the first concrete Circuit Atlas method: repeated fixed-size blocks are stored once, and distant occurrences reference a packed chunk-id stream. `zip-tensor-split` parses stored ZIP/PyTorch tensor archives, separates large `*/data/*` storage entries from exact ZIP metadata, compresses the two streams independently, and reconstructs by interleaving recorded metadata gaps and tensor lengths. Both are cost-gated and remain unavailable when they cannot beat the current prelude candidate.
+
+### ZBPK v4-v6: bit-wise dictionaries plus structural method slots
+
+The on-disk format is now **ZBPK v6**. v3 rebuilt every dictionary section under the same rule the topology bit-packing introduced: spend only the bits each enumeration value or magnitude actually needs, never a whole byte for a single bit of state. v4 keeps that layout and uses another reserved 4-bit method slot for `raw-brotli`, a no-dictionary payload method for text-heavy inputs:
 
 - **ZBPK header.** `method` (≤ 16 values) and `bits_per_symbol` (0..=15) are packed into one byte (4 bits each). `unique_count`, `original_size`, `dict_size`, and `payload_size` are varints instead of fixed `u16`/`u64`. The header on a 62 KB text file shrinks from 36 B to **17 B**.
 - **Framed-payload dictionary.** The six u32 size fields (prefix_len, suffix_len, base_chunk_len, full_chunk_count, tail_chunk_len, total_chunks) are varints; the fixed section drops from 28 B to ~12 B.
@@ -335,6 +339,8 @@ The on-disk format is now **ZBPK v4**. v3 rebuilt every dictionary section under
 - **Monotonic-delta dictionary.** One packed byte `(width-1:3 | mode:3 | codec:2)`, then `trailing_zero_shift` (6 bits used out of its byte), then varint `count`/`first_value`/`transformed_plain_len`. Drops from 28 B to ~12 B.
 - **Raw-brotli payload.** No dictionary; the payload is a Brotli q11 stream. It is evaluated only for bounded text-like inputs and selected only when it beats the other total packed sizes.
 - **Prime-sequence dictionary (v5, opt-in encoder).** A no-payload structural method for exact consecutive-prime tables: one byte width plus varint `count`, `first_value`, and `last_value`. Decoding stays enabled for v5 files; encoding requires `ZBIT_ENABLE_PRIME_SEQUENCE=1`.
+- **Exact-block-atlas dictionary (v6).** Chunk size, block count, unique count, codec ids, payload lengths, and a packed index stream referencing unique chunks.
+- **ZIP tensor split dictionary (v6).** Codec ids plus alternating metadata gap lengths and tensor data lengths for exact reinterleaving of stored ZIP tensor entries.
 
 All five share the **same** dense `kind_to_compact_index` table the topology bit-packing introduced, so the 49 distinct `CircuitTransformKind`-derived values fit in exactly 6 bits everywhere they appear. Measured wins on the existing corpus (all `PASS`):
 

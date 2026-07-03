@@ -13,6 +13,43 @@
 - License file: `LICENSE`
 
 ## Recent Updates
+- 2026-07-03: Landed the first general ratio-improvement pass after disabling the
+  corpus-specific prime path: real LZMA delta-filter support, an exact repeated-block
+  Circuit Atlas candidate, and a stored-ZIP tensor/metadata split candidate. ZBPK is now
+  v6; decode accepts v4 through v6.
+
+  Files modified:
+  - **`zbit-rs/Cargo.toml` / `Cargo.lock`** — added direct `lzma-sys = "0.1"` dependency
+    so the delta filter FFI is explicit rather than relying on `xz2` transitively.
+  - **`zbit-rs/src/pack/codecs.rs`** — `xz_encode_with_delta_tuning` builds a
+    `delta -> LZMA2` filter chain through `lzma_stream_buffer_encode`; tuned-XZ delta
+    entries are admitted only after a sampled autocorrelation gate over distances
+    `{1,2,3,4,8}`. Added `exact-block-atlas` encode/decode helpers (unique chunks +
+    packed index stream) and `zip-tensor-split` helpers (stored ZIP/PyTorch `*/data/*`
+    ranges split from exact metadata and reinterleaved by recorded gap/data lengths).
+  - **`zbit-rs/src/pack_rules.rs`** — added `PackMethod::ExactBlockAtlas` at method 13
+    and `PackMethod::ZipTensorSplit` at method 14, both ranked by exact packed bytes.
+  - **`zbit-rs/src/pack/core.rs`** — bumped `ZBPK_VERSION` to 6; added stream structs,
+    candidate sizing, write/decode dispatch, stats fields, and raw-XZ skip participation
+    for the atlas/container structural candidates.
+  - **`zbit-rs/src/pack/stream.rs`** — updated `write_pack_bytes` callsites with the new
+    non-stream candidate slots.
+  - **`zbit-rs/src/bin/benchmark_real_file.rs`** — report now prints exact-block-atlas
+    and ZIP tensor split candidate sizes.
+  - **`zbit-rs/src/pack/tests.rs`** — added direct delta-XZ roundtrip/autocorrelation
+    coverage, exact-block-atlas pack roundtrip coverage, and stored-ZIP tensor split
+    roundtrip coverage.
+  - **`README.md`, `ROADMAP.md`, `AGENTS.md`,
+    `zbit-rs/benchmark_primary.3b_latest.txt`** — documented v6 and refreshed the primary
+    report with the new candidate fields. Default primary remains `monotonic-delta`
+    `562 799` bytes; exact-block-atlas and ZIP tensor split are unavailable on that corpus.
+
+  Validation: `cargo check --manifest-path zbit-rs/Cargo.toml` PASS;
+  `cargo test -q --manifest-path zbit-rs/Cargo.toml` PASS (43 lib tests + non-ignored
+  integration tests); `zbit-rs/scripts/check_benchmark_budgets.sh primary.3b` PASS
+  (`562799` bytes, `3634 ms` in the serial harness run); regenerated
+  `zbit-rs/benchmark_primary.3b_latest.txt` still selects `monotonic-delta`
+  (`562799` bytes, `2793.249 ms`) with validation PASS.
 - 2026-07-03: Disabled ZBPK v5 `prime-sequence` by default after review because the
   25-byte `primary.3b` result is too corpus-specific for general compression-ratio
   comparisons. The method remains implemented and decodable, but encoder evaluation now

@@ -454,6 +454,7 @@ dependencies = [
  "brotli",
  "crc32fast",
  "flate2",
+ "lzma-sys",
  "preflate-rs",
  "rayon",
  "xxhash-rust",

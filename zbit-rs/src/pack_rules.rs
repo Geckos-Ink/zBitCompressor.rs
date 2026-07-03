@@ -26,6 +26,12 @@ pub enum PackMethod {
     // Consecutive prime table stored as fixed-width little-endian integers. The dictionary
     // stores width/count/first/last and the decoder regenerates the table with a sieve.
     PrimeSequence,
+    // First concrete Circuit Atlas path: repeated fixed-size byte regions are stored once
+    // and nonlocal occurrences reference the shared chunk id through a packed index stream.
+    ExactBlockAtlas,
+    // Stored ZIP/PyTorch tensor container path: large tensor storage entries are separated
+    // from exact ZIP metadata and encoded as their own bulk stream.
+    ZipTensorSplit,
 }
 
 impl PackMethod {
@@ -44,6 +50,8 @@ impl PackMethod {
             Self::RawBrotli => 10,
             Self::AdaptiveTransformedXz => 11,
             Self::PrimeSequence => 12,
+            Self::ExactBlockAtlas => 13,
+            Self::ZipTensorSplit => 14,
         }
     }
 
@@ -62,6 +70,8 @@ impl PackMethod {
             10 => Some(Self::RawBrotli),
             11 => Some(Self::AdaptiveTransformedXz),
             12 => Some(Self::PrimeSequence),
+            13 => Some(Self::ExactBlockAtlas),
+            14 => Some(Self::ZipTensorSplit),
             _ => None,
         }
     }
@@ -81,6 +91,8 @@ impl PackMethod {
             Self::RawBrotli => "raw-brotli",
             Self::PrimeSequence => "prime-sequence",
             Self::AdaptiveTransformedXz => "adaptive-transformed-xz",
+            Self::ExactBlockAtlas => "exact-block-atlas",
+            Self::ZipTensorSplit => "zip-tensor-split",
         }
     }
 }
@@ -106,6 +118,8 @@ pub struct PackEvaluation {
     pub monotonic_delta_total_bytes: Option<usize>,
     pub prime_sequence_total_bytes: Option<usize>,
     pub adaptive_transformed_xz_total_bytes: Option<usize>,
+    pub exact_block_atlas_total_bytes: Option<usize>,
+    pub zip_tensor_split_total_bytes: Option<usize>,
 
     pub chosen_method: PackMethod,
     pub chosen_reason: String,
@@ -131,6 +145,8 @@ impl PackEvaluation {
             monotonic_delta_total_bytes: None,
             prime_sequence_total_bytes: None,
             adaptive_transformed_xz_total_bytes: None,
+            exact_block_atlas_total_bytes: None,
+            zip_tensor_split_total_bytes: None,
             chosen_method: PackMethod::RawCopy,
             chosen_reason: String::new(),
         }
@@ -304,6 +320,28 @@ pub fn choose_best_method(eval: &mut PackEvaluation) {
             best_reason = format!(
                 "adaptive-transformed-xz improves size: {} -> {} bytes",
                 eval.raw_total_bytes, adaptive_size
+            );
+        }
+    }
+
+    if let Some(atlas_size) = eval.exact_block_atlas_total_bytes {
+        if atlas_size < best_size {
+            best_method = PackMethod::ExactBlockAtlas;
+            best_size = atlas_size;
+            best_reason = format!(
+                "exact-block-atlas improves size: {} -> {} bytes",
+                eval.raw_total_bytes, atlas_size
+            );
+        }
+    }
+
+    if let Some(zip_tensor_size) = eval.zip_tensor_split_total_bytes {
+        if zip_tensor_size < best_size {
+            best_method = PackMethod::ZipTensorSplit;
+            best_size = zip_tensor_size;
+            best_reason = format!(
+                "zip-tensor-split improves size: {} -> {} bytes",
+                eval.raw_total_bytes, zip_tensor_size
             );
         }
     }

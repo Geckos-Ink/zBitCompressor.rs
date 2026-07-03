@@ -1,5 +1,5 @@
 zBit-rs Real File Benchmark Report
-Generated: 2026-07-03 01:47:18
+Generated: 2026-07-03 02:06:29
 Input file: assets/primary.3b.bin
 Compressed artifact: zbit-rs/benchmark_primary.3b.zbpk
 
@@ -14,6 +14,8 @@ Skipped candidates:
 - prime-sequence skipped: disabled by default; set ZBIT_ENABLE_PRIME_SEQUENCE=1 to enable exact prime-table detection
 - monotonic gap transform skipped by 'balanced' profile
 - adaptive-transformed-xz skipped: raw-xz already strong (ratio <= 0.30, payload 913588 on input 3233613)
+- exact-block-atlas skipped: no repeated fixed-size block layout passed the cost gate
+- zip-tensor-split skipped: no multi-entry stored tensor ZIP layout detected
 - raw-xz full tuning matrix skipped: structural candidate beats cheap raw-xz estimate beyond any plausible tuning gain
 - indexed-circuit skipped: symbol width <= 8 bits: raw dictionary is denser than circuit descriptors
 
@@ -30,25 +32,27 @@ Recursive-circuit-xz candidate size (bytes): unavailable
 Monotonic-delta candidate size (bytes): 562810
 Prime-sequence candidate size (bytes): unavailable
 Adaptive-transformed-xz candidate size (bytes): unavailable
+Exact-block-atlas candidate size (bytes): unavailable
+ZIP tensor split candidate size (bytes): unavailable
 
 Original size (bytes): 3233613
 Compressed size (bytes): 562799
 Compression ratio (compressed/original): 0.174046
 Space savings (%): 82.60
 
-Compression time (ms): 3271.924
-Decompression time (ms): 33.379
-Compression throughput (MiB/s): 0.943
-Decompression throughput (MiB/s): 92.387
+Compression time (ms): 2793.249
+Decompression time (ms): 29.227
+Compression throughput (MiB/s): 1.104
+Decompression throughput (MiB/s): 105.512
 
 Candidate timing breakdown (ms):
-- index stream build: 75.070
-- huffman stream build: 80.500
-- raw-deflate encode: 85.721
-- raw-zstd encode: 312.850
-- raw-brotli gate/encode: 4.508
-- raw-xz encode: 449.029
-- framed extraction: 38.901
+- index stream build: 83.103
+- huffman stream build: 77.343
+- raw-deflate encode: 91.619
+- raw-zstd encode: 294.573
+- raw-brotli gate/encode: 6.400
+- raw-xz encode: 431.401
+- framed extraction: 38.360
 - recursive preflate search: 0.000
 - recursive transform sampling: 0.000
 - recursive transform evaluation: 0.000

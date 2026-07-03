@@ -188,6 +188,8 @@ Recursive-circuit-xz candidate size (bytes): {recursive_circuit_xz}\n\
 Monotonic-delta candidate size (bytes): {monotonic_delta}\n\
 Prime-sequence candidate size (bytes): {prime_sequence}\n\
 Adaptive-transformed-xz candidate size (bytes): {adaptive_transformed_xz}\n\
+Exact-block-atlas candidate size (bytes): {exact_block_atlas}\n\
+ZIP tensor split candidate size (bytes): {zip_tensor_split}\n\
 \n\
 Original size (bytes): {orig}\n\
 Compressed size (bytes): {comp}\n\
@@ -285,6 +287,14 @@ Output validation: {valid}\n",
             .unwrap_or_else(|| "unavailable".to_string()),
         adaptive_transformed_xz = stats
             .adaptive_transformed_xz_candidate_bytes
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unavailable".to_string()),
+        exact_block_atlas = stats
+            .exact_block_atlas_candidate_bytes
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unavailable".to_string()),
+        zip_tensor_split = stats
+            .zip_tensor_split_candidate_bytes
             .map(|v| v.to_string())
             .unwrap_or_else(|| "unavailable".to_string()),
         orig = stats.original_size,

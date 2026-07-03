@@ -372,6 +372,165 @@ mod tests {
     }
 
     #[test]
+    fn lzma_delta_tuning_roundtrips_as_xz_stream() {
+        let mut input = Vec::with_capacity(96 * 1024);
+        for idx in 0..(96 * 1024) {
+            let lane = idx % 4;
+            let row = idx / 4;
+            input.push(((row + lane * 17) & 0xFF) as u8);
+        }
+
+        let eligible = eligible_delta_distances(&input, CompressionProfile::Balanced);
+        assert!(
+            eligible.contains(&4),
+            "expected distance-4 autocorrelation, got {eligible:?}"
+        );
+        let payload = xz_encode_with_tuning(
+            &input,
+            9,
+            XzTuningParams {
+                literal_context_bits: 3,
+                literal_position_bits: 0,
+                position_bits: 0,
+                dict_size: 8 * 1024 * 1024,
+                nice_len: 64,
+                match_finder: MatchFinder::BinaryTree4,
+                mode: Mode::Normal,
+                depth: 0,
+                delta_dist: 4,
+            },
+        )
+        .expect("delta xz encode");
+        let decoded = xz_decode_all(&payload).expect("xz decode");
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn exact_block_atlas_roundtrips_repeated_nonlocal_blocks() {
+        let mut unique_blocks = Vec::new();
+        for block in 0..12usize {
+            let mut chunk = vec![0u8; 1024];
+            let mut state = 0x9E37_79B9u32 ^ block as u32;
+            for byte in &mut chunk {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                *byte = (state >> 24) as u8;
+            }
+            unique_blocks.push(chunk);
+        }
+
+        let mut input = Vec::new();
+        for round in 0..8usize {
+            for block in 0..unique_blocks.len() {
+                let idx = (block * 5 + round * 7) % unique_blocks.len();
+                input.extend_from_slice(&unique_blocks[idx]);
+            }
+        }
+        input.extend_from_slice(b"tail");
+
+        let mut context = CompressionContext::new(CompressionProfile::Balanced);
+        let atlas = build_exact_block_atlas_stream(&input, &mut context, None)
+            .expect("atlas build")
+            .expect("atlas candidate");
+        assert!(atlas.unique_count < atlas.block_count);
+
+        let empty_stream = IndexStream {
+            unique_symbols: Vec::new(),
+            bits_per_symbol: 0,
+            payload: Vec::new(),
+            frequencies: [0u32; 256],
+        };
+        let pack = write_pack_bytes(
+            PackMethod::ExactBlockAtlas,
+            &input,
+            &empty_stream,
+            None,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&atlas),
+            None,
+        )
+        .expect("write atlas pack");
+        let decoded = decompress_pack_bytes(&pack).expect("decode atlas pack");
+        assert_eq!(decoded, input);
+    }
+
+    fn append_stored_zip_entry(out: &mut Vec<u8>, name: &str, data: &[u8]) {
+        push_u32(out, 0x0403_4B50);
+        push_u16(out, 20);
+        push_u16(out, 0);
+        push_u16(out, 0);
+        push_u16(out, 0);
+        push_u16(out, 0);
+        push_u32(out, 0);
+        push_u32(out, data.len() as u32);
+        push_u32(out, data.len() as u32);
+        push_u16(out, name.len() as u16);
+        push_u16(out, 0);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+    }
+
+    #[test]
+    fn zip_tensor_split_roundtrips_stored_tensor_entries() {
+        let mut input = Vec::new();
+        for entry in 0..2usize {
+            let mut data = Vec::with_capacity(96 * 1024);
+            for idx in 0..(96 * 1024) {
+                data.push(((idx / 4 + entry * 23 + idx % 4) & 0xFF) as u8);
+            }
+            append_stored_zip_entry(&mut input, &format!("model/data/{entry}"), &data);
+        }
+        push_u32(&mut input, 0x0201_4B50);
+        input.extend_from_slice(b"central-directory-placeholder");
+
+        let mut context = CompressionContext::new(CompressionProfile::Balanced);
+        let zip_tensor = build_zip_tensor_split_stream(&input, &mut context, None)
+            .expect("zip tensor build")
+            .expect("zip tensor candidate");
+        assert_eq!(zip_tensor.data_lengths.len(), 2);
+
+        let empty_stream = IndexStream {
+            unique_symbols: Vec::new(),
+            bits_per_symbol: 0,
+            payload: Vec::new(),
+            frequencies: [0u32; 256],
+        };
+        let pack = write_pack_bytes(
+            PackMethod::ZipTensorSplit,
+            &input,
+            &empty_stream,
+            None,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&zip_tensor),
+        )
+        .expect("write zip tensor pack");
+        let decoded = decompress_pack_bytes(&pack).expect("decode zip tensor pack");
+        assert_eq!(decoded, input);
+    }
+
+    #[test]
     fn adaptive_pack_evaluates_framed_raw_and_roundtrips() {
         let input = build_framed_container_with_many_frames();
 

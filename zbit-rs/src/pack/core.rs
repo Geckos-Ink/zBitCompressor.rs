@@ -23,7 +23,7 @@ use xz2::write::XzEncoder as XzWriterEncoder;
 use zstd::stream as zstd_stream;
 
 pub const ZBPK_MAGIC: u32 = 0x5A42_504B; // "ZBPK"
-pub const ZBPK_VERSION: u16 = 5;
+pub const ZBPK_VERSION: u16 = 6;
 // Upper bound used for candidate-size estimation. The actual header is variable-length:
 //   magic u32 (4) + version u16 (2) + flags u16 (2) + packed method-and-bits u8 (1)
 //   + varint unique_count + varint original_size + varint dict_size + varint payload_size.
@@ -325,6 +325,8 @@ pub struct PackStats {
     pub monotonic_delta_candidate_bytes: Option<usize>,
     pub prime_sequence_candidate_bytes: Option<usize>,
     pub adaptive_transformed_xz_candidate_bytes: Option<usize>,
+    pub exact_block_atlas_candidate_bytes: Option<usize>,
+    pub zip_tensor_split_candidate_bytes: Option<usize>,
 
     pub chosen_method: PackMethod,
     pub chosen_reason: String,
@@ -691,6 +693,33 @@ struct AdaptiveTransformedXzStream {
     codec: PayloadCodec,
     plain_len: u64,
     payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct ExactBlockAtlasStream {
+    chunk_size: usize,
+    block_count: usize,
+    tail_len: usize,
+    unique_count: usize,
+    index_plain_len: usize,
+    unique_codec: PayloadCodec,
+    index_codec: PayloadCodec,
+    tail_codec: PayloadCodec,
+    unique_payload: Vec<u8>,
+    index_payload: Vec<u8>,
+    tail_payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct ZipTensorSplitStream {
+    gap_lengths: Vec<usize>,
+    data_lengths: Vec<usize>,
+    metadata_plain_len: usize,
+    tensor_plain_len: usize,
+    metadata_codec: PayloadCodec,
+    tensor_codec: PayloadCodec,
+    metadata_payload: Vec<u8>,
+    tensor_payload: Vec<u8>,
 }
 
 #[derive(Debug, Default)]
@@ -1312,6 +1341,8 @@ fn write_pack_bytes(
     monotonic_stream: Option<&MonotonicDeltaStream>,
     prime_sequence_stream: Option<&PrimeSequenceStream>,
     adaptive_xz_stream: Option<&AdaptiveTransformedXzStream>,
+    exact_block_atlas_stream: Option<&ExactBlockAtlasStream>,
+    zip_tensor_split_stream: Option<&ZipTensorSplitStream>,
 ) -> ZbitResult<Vec<u8>> {
     if stream.unique_symbols.len() > u16::MAX as usize {
         return Err(ZbitError::Limit(
@@ -1431,12 +1462,38 @@ fn write_pack_bytes(
                 adaptive.payload.len(),
             )
         }
+        PackMethod::ExactBlockAtlas => {
+            let atlas = exact_block_atlas_stream.ok_or_else(|| {
+                ZbitError::Internal(
+                    "exact-block-atlas stream missing for exact-block-atlas method".to_string(),
+                )
+            })?;
+            (
+                0u8,
+                0usize,
+                exact_block_atlas_dictionary_size(atlas),
+                atlas.unique_payload.len() + atlas.index_payload.len() + atlas.tail_payload.len(),
+            )
+        }
+        PackMethod::ZipTensorSplit => {
+            let zip_tensor = zip_tensor_split_stream.ok_or_else(|| {
+                ZbitError::Internal(
+                    "zip-tensor-split stream missing for zip-tensor-split method".to_string(),
+                )
+            })?;
+            (
+                0u8,
+                0usize,
+                zip_tensor_split_dictionary_size(zip_tensor),
+                zip_tensor.metadata_payload.len() + zip_tensor.tensor_payload.len(),
+            )
+        }
     };
 
     let mut out = Vec::with_capacity(ZBPK_HEADER_BYTES + dict_size + payload_size);
 
-    // v5 header layout (same packed fields as v4; v5 adds the opt-in prime-sequence
-    // method and optional monotonic gap-stream transform metadata):
+    // v6 header layout (same packed fields as v5; v6 spends two more method slots on
+    // exact-block-atlas and zip-tensor-split):
     //   magic u32        — wire-stable
     //   version u16      — wire-stable
     //   flags u16        — reserved, MUST be 0
@@ -1552,6 +1609,23 @@ fn write_pack_bytes(
             })?;
             write_adaptive_transformed_xz_dictionary(&mut out, adaptive);
         }
+        PackMethod::ExactBlockAtlas => {
+            let atlas = exact_block_atlas_stream.ok_or_else(|| {
+                ZbitError::Internal(
+                    "exact-block-atlas stream missing for exact-block-atlas dictionary"
+                        .to_string(),
+                )
+            })?;
+            write_exact_block_atlas_dictionary(&mut out, atlas);
+        }
+        PackMethod::ZipTensorSplit => {
+            let zip_tensor = zip_tensor_split_stream.ok_or_else(|| {
+                ZbitError::Internal(
+                    "zip-tensor-split stream missing for zip-tensor-split dictionary".to_string(),
+                )
+            })?;
+            write_zip_tensor_split_dictionary(&mut out, zip_tensor);
+        }
     }
 
     match method {
@@ -1627,6 +1701,25 @@ fn write_pack_bytes(
                 )
             })?;
             out.extend_from_slice(&adaptive.payload);
+        }
+        PackMethod::ExactBlockAtlas => {
+            let atlas = exact_block_atlas_stream.ok_or_else(|| {
+                ZbitError::Internal(
+                    "exact-block-atlas stream missing for exact-block-atlas payload".to_string(),
+                )
+            })?;
+            out.extend_from_slice(&atlas.unique_payload);
+            out.extend_from_slice(&atlas.index_payload);
+            out.extend_from_slice(&atlas.tail_payload);
+        }
+        PackMethod::ZipTensorSplit => {
+            let zip_tensor = zip_tensor_split_stream.ok_or_else(|| {
+                ZbitError::Internal(
+                    "zip-tensor-split stream missing for zip-tensor-split payload".to_string(),
+                )
+            })?;
+            out.extend_from_slice(&zip_tensor.metadata_payload);
+            out.extend_from_slice(&zip_tensor.tensor_payload);
         }
     }
 
@@ -1821,9 +1914,26 @@ fn compress_adaptive_to_bytes_inner(
     let adaptive_transformed_xz_candidate_bytes = adaptive_xz_stream.as_ref().map(|stream| {
         ZBPK_HEADER_BYTES + adaptive_transformed_xz_dictionary_size(stream) + stream.payload.len()
     });
+    let exact_block_atlas_stream =
+        build_exact_block_atlas_stream(input, &mut context, best_prelude_candidate_bytes)?;
+    let exact_block_atlas_candidate_bytes = exact_block_atlas_stream.as_ref().map(|stream| {
+        ZBPK_HEADER_BYTES
+            + exact_block_atlas_dictionary_size(stream)
+            + stream.unique_payload.len()
+            + stream.index_payload.len()
+            + stream.tail_payload.len()
+    });
+    let zip_tensor_split_stream =
+        build_zip_tensor_split_stream(input, &mut context, best_prelude_candidate_bytes)?;
+    let zip_tensor_split_candidate_bytes = zip_tensor_split_stream.as_ref().map(|stream| {
+        ZBPK_HEADER_BYTES
+            + zip_tensor_split_dictionary_size(stream)
+            + stream.metadata_payload.len()
+            + stream.tensor_payload.len()
+    });
 
     // Now decide whether the full raw-xz tuning matrix is worth the cost. All structural
-    // candidates (recursive-circuit-xz, monotonic-delta, adaptive-transformed-xz) are
+    // candidates (recursive-circuit-xz, monotonic-delta, adaptive-transformed-xz, atlas, container) are
     // already sized at this point, so the decision tiers are:
     //   1. adaptive clearly wins over the cheap estimate (the original depth_anything gate);
     //   2. the best structural candidate is at most 5/8 of the cheap raw-xz total — the
@@ -1841,6 +1951,8 @@ fn compress_adaptive_to_bytes_inner(
         monotonic_delta_candidate_bytes,
         prime_sequence_candidate_bytes,
         adaptive_transformed_xz_candidate_bytes,
+        exact_block_atlas_candidate_bytes,
+        zip_tensor_split_candidate_bytes,
     ]
     .into_iter()
     .flatten()
@@ -1909,6 +2021,8 @@ fn compress_adaptive_to_bytes_inner(
     eval.monotonic_delta_total_bytes = monotonic_delta_candidate_bytes;
     eval.prime_sequence_total_bytes = prime_sequence_candidate_bytes;
     eval.adaptive_transformed_xz_total_bytes = adaptive_transformed_xz_candidate_bytes;
+    eval.exact_block_atlas_total_bytes = exact_block_atlas_candidate_bytes;
+    eval.zip_tensor_split_total_bytes = zip_tensor_split_candidate_bytes;
 
     let (should_eval_circuit, circuit_rule_note) = should_evaluate_circuit(&eval);
     if !should_eval_circuit {
@@ -1943,6 +2057,8 @@ fn compress_adaptive_to_bytes_inner(
         monotonic_stream.as_ref(),
         prime_sequence_stream.as_ref(),
         adaptive_xz_stream.as_ref(),
+        exact_block_atlas_stream.as_ref(),
+        zip_tensor_split_stream.as_ref(),
     )?;
 
     let (bits_per_symbol, payload_bytes, huffman_dictionary_bytes) = match eval.chosen_method {
@@ -1998,6 +2114,30 @@ fn compress_adaptive_to_bytes_inner(
             })?;
             (0u8, adaptive.payload.len(), 0usize)
         }
+        PackMethod::ExactBlockAtlas => {
+            let atlas = exact_block_atlas_stream.as_ref().ok_or_else(|| {
+                ZbitError::Internal(
+                    "exact-block-atlas selected without exact-block-atlas stream".to_string(),
+                )
+            })?;
+            (
+                0u8,
+                atlas.unique_payload.len() + atlas.index_payload.len() + atlas.tail_payload.len(),
+                0usize,
+            )
+        }
+        PackMethod::ZipTensorSplit => {
+            let zip_tensor = zip_tensor_split_stream.as_ref().ok_or_else(|| {
+                ZbitError::Internal(
+                    "zip-tensor-split selected without zip-tensor-split stream".to_string(),
+                )
+            })?;
+            (
+                0u8,
+                zip_tensor.metadata_payload.len() + zip_tensor.tensor_payload.len(),
+                0usize,
+            )
+        }
     };
 
     let active_profile = context.profile.name().to_string();
@@ -2034,6 +2174,8 @@ fn compress_adaptive_to_bytes_inner(
         monotonic_delta_candidate_bytes,
         prime_sequence_candidate_bytes,
         adaptive_transformed_xz_candidate_bytes,
+        exact_block_atlas_candidate_bytes,
+        zip_tensor_split_candidate_bytes,
         chosen_method: eval.chosen_method,
         chosen_reason: eval.chosen_reason,
         circuit_rule_note,
@@ -2231,6 +2373,22 @@ fn decompress_pack_bytes(bytes: &[u8]) -> ZbitResult<Vec<u8>> {
             }
             return decode_adaptive_transformed_xz_payload(dict, payload, original_size);
         }
+        PackMethod::ExactBlockAtlas => {
+            if bits_per_symbol != 0 || unique_count != 0 {
+                return Err(ZbitError::Parse(
+                    "exact-block-atlas requires bits_per_symbol=0 and unique_count=0".to_string(),
+                ));
+            }
+            return decode_exact_block_atlas_payload(dict, payload, original_size);
+        }
+        PackMethod::ZipTensorSplit => {
+            if bits_per_symbol != 0 || unique_count != 0 {
+                return Err(ZbitError::Parse(
+                    "zip-tensor-split requires bits_per_symbol=0 and unique_count=0".to_string(),
+                ));
+            }
+            return decode_zip_tensor_split_payload(dict, payload, original_size);
+        }
         PackMethod::IndexedHuffman => {
             if bits_per_symbol != 0 {
                 return Err(ZbitError::Parse(
@@ -2263,7 +2421,9 @@ fn decompress_pack_bytes(bytes: &[u8]) -> ZbitResult<Vec<u8>> {
         | PackMethod::RecursiveCircuitXz
         | PackMethod::MonotonicDelta
         | PackMethod::PrimeSequence
-        | PackMethod::AdaptiveTransformedXz => {
+        | PackMethod::AdaptiveTransformedXz
+        | PackMethod::ExactBlockAtlas
+        | PackMethod::ZipTensorSplit => {
             unreachable!()
         }
     };

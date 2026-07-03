@@ -449,14 +449,16 @@ measured numbers and says why the extra time buys bytes.
    by default because it must prove a general non-prime win before entering the balanced
    comparison suite. Time cost: plan search over a ~1 MiB gap payload is hundreds of ms
    and runs only in deep/research when monotonic-delta already beats every raw candidate.
-3. **Container-aware depth path** (depth stretch `< 0.80`). Parse the PK-ZIP wrapper,
-   split metadata from tensor bulk, per-entry plan search bounded by sample pre-rank.
-   Expected to *reduce* wall time too: many small bounded searches replace one 95 MiB
-   search. Accept: depth bytes `< 83 380 762`, wall `≤ 400 s`.
-4. **N4 LZMA delta filter** (lzma-sys raw filter chain; `delta_dist` field already
-   inert in `XzTuningParams`). Admission rule: add delta entries to the matrix **only
-   when the existing autocorrelation scan reports a dominant period ∈ {2,3,4,8}**,
-   never unconditionally. Accept: bytes down somewhere, cat wall `≤ 38 s`.
+3. **Container-aware depth path** — first pass implemented 2026-07-03 as ZBPK v6
+   `zip-tensor-split`. It parses stored ZIP/PyTorch local entries, splits large
+   `*/data/*` tensor storage from exact ZIP metadata, encodes the two streams separately,
+   and reconstructs by replaying metadata gaps plus tensor lengths. Still queued: per-entry
+   tensor predictors/sample-ranked transform search. Accept remains depth bytes
+   `< 83 380 762`, wall `≤ 400 s`.
+4. **N4 LZMA delta filter** — implemented 2026-07-03 through direct `lzma-sys` filter-chain
+   encoding. Delta entries enter the tuned-XZ matrix only when a sampled autocorrelation
+   scan admits distance ∈ {1,2,3,4,8}; never unconditionally. Accept: bytes down somewhere,
+   cat wall `≤ 38 s`.
 5. **Brotli as inner payload codec** for transformed/gap payloads. Blocked on the
    saturated 2-bit `PayloadCodec` field — fold the field widening into the same v5 bump
    as (1); probe gated by the same text-likeness + size checks as top-level raw-brotli.
@@ -621,17 +623,17 @@ Cost profile on cat (deep): adds ~30–60 s to a full deep encode (per-block pla
 + a couple extra full-data XZ-9 encodes). Off entirely for fast/balanced via the
 `CompressionProfile::multi_block_split_counts()` gate.
 
-### N4. LZMA delta filter via xz2 / direct lzma-sys (medium impact)
+### N4. LZMA delta filter via lzma-sys (medium impact)
 
-We already added an inert `delta_dist` field to `XzTuningParams`. The xz2 crate does not
-expose `Filters::delta()`, but the LZMA delta filter is in the xz Utils binary and the
-lzma-sys crate. Two options:
+Implemented 2026-07-03 with direct `lzma-sys` use: `xz_encode_with_delta_tuning`
+constructs a `delta -> LZMA2` filter chain through `lzma_stream_buffer_encode`, while
+the resulting payload remains a normal XZ container decoded by the existing XZ decoder.
+The previously inert `delta_dist` field now carries real work.
 
-1. Vendor a minimal patch to xz2 exposing `delta(dist)`.
-2. Drop to the lzma-sys raw API and build the filter chain manually.
-
-The delta filter combined with LZMA2 historically wins 1–5 % on PNG-decoded plain because
-it gives LZMA2 access to channel-aware residual coding.
+Admission is gated by `eligible_delta_distances`: a 512 KiB sampled byte-autocorrelation
+scan compares candidate distances `{1,2,3,4,8}` to a far-lag baseline and only admits
+distances with a clearly lower residual. Profile caps keep balanced to two normal
+delta probes, with extreme delta probes limited to deep/research.
 
 Expected impact: another 1–3 % on top of N1 if both are kept; partial overlap.
 
@@ -729,6 +731,11 @@ This roadmap therefore treats the next version as a **Circuit Atlas compressor**
 ## Target Architecture: Circuit Atlas
 
 A **Circuit Atlas** is a global dictionary of reusable reversible circuits, predictors, transforms, and residual encoders discovered over the whole input. It must be usable in normal mode and stream mode.
+
+First concrete implementation landed 2026-07-03 as ZBPK v6 `exact-block-atlas`: repeated
+fixed-size byte blocks are stored once and nonlocal occurrences reference the unique block
+through a packed index stream. This is deliberately exact-only; near-match residuals and
+transform-parameter atlas entries remain future work.
 
 A circuit atlas entry should answer:
 
