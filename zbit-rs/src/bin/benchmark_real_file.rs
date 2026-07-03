@@ -186,6 +186,7 @@ Raw-xz candidate size (bytes): {raw_xz}\n\
 Framed-raw candidate size (bytes): {framed_raw}\n\
 Recursive-circuit-xz candidate size (bytes): {recursive_circuit_xz}\n\
 Monotonic-delta candidate size (bytes): {monotonic_delta}\n\
+Prime-sequence candidate size (bytes): {prime_sequence}\n\
 Adaptive-transformed-xz candidate size (bytes): {adaptive_transformed_xz}\n\
 \n\
 Original size (bytes): {orig}\n\
@@ -276,6 +277,10 @@ Output validation: {valid}\n",
             .unwrap_or_else(|| "unavailable".to_string()),
         monotonic_delta = stats
             .monotonic_delta_candidate_bytes
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "unavailable".to_string()),
+        prime_sequence = stats
+            .prime_sequence_candidate_bytes
             .map(|v| v.to_string())
             .unwrap_or_else(|| "unavailable".to_string()),
         adaptive_transformed_xz = stats

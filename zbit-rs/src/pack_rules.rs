@@ -23,6 +23,9 @@ pub enum PackMethod {
     // in the dictionary so the decoder can invert the transform and recover the original
     // bytes.
     AdaptiveTransformedXz,
+    // Consecutive prime table stored as fixed-width little-endian integers. The dictionary
+    // stores width/count/first/last and the decoder regenerates the table with a sieve.
+    PrimeSequence,
 }
 
 impl PackMethod {
@@ -40,6 +43,7 @@ impl PackMethod {
             Self::RawXz => 9,
             Self::RawBrotli => 10,
             Self::AdaptiveTransformedXz => 11,
+            Self::PrimeSequence => 12,
         }
     }
 
@@ -57,6 +61,7 @@ impl PackMethod {
             9 => Some(Self::RawXz),
             10 => Some(Self::RawBrotli),
             11 => Some(Self::AdaptiveTransformedXz),
+            12 => Some(Self::PrimeSequence),
             _ => None,
         }
     }
@@ -74,6 +79,7 @@ impl PackMethod {
             Self::MonotonicDelta => "monotonic-delta",
             Self::RawXz => "raw-xz",
             Self::RawBrotli => "raw-brotli",
+            Self::PrimeSequence => "prime-sequence",
             Self::AdaptiveTransformedXz => "adaptive-transformed-xz",
         }
     }
@@ -98,6 +104,7 @@ pub struct PackEvaluation {
     pub framed_raw_total_bytes: Option<usize>,
     pub recursive_circuit_xz_total_bytes: Option<usize>,
     pub monotonic_delta_total_bytes: Option<usize>,
+    pub prime_sequence_total_bytes: Option<usize>,
     pub adaptive_transformed_xz_total_bytes: Option<usize>,
 
     pub chosen_method: PackMethod,
@@ -122,6 +129,7 @@ impl PackEvaluation {
             framed_raw_total_bytes: None,
             recursive_circuit_xz_total_bytes: None,
             monotonic_delta_total_bytes: None,
+            prime_sequence_total_bytes: None,
             adaptive_transformed_xz_total_bytes: None,
             chosen_method: PackMethod::RawCopy,
             chosen_reason: String::new(),
@@ -274,6 +282,17 @@ pub fn choose_best_method(eval: &mut PackEvaluation) {
             best_reason = format!(
                 "monotonic-delta improves size: {} -> {} bytes",
                 eval.raw_total_bytes, monotonic_delta_size
+            );
+        }
+    }
+
+    if let Some(prime_sequence_size) = eval.prime_sequence_total_bytes {
+        if prime_sequence_size < best_size {
+            best_method = PackMethod::PrimeSequence;
+            best_size = prime_sequence_size;
+            best_reason = format!(
+                "prime-sequence improves size: {} -> {} bytes",
+                eval.raw_total_bytes, prime_sequence_size
             );
         }
     }

@@ -1,6 +1,6 @@
 # zBit Circuit-Based Compression Roadmap
 
-_Last updated: 2026-07-02_
+_Last updated: 2026-07-03_
 
 ## Honest Note on Dictionary Compaction Limits (v3/v4 retrospective)
 
@@ -12,22 +12,26 @@ Further header-level bit-packing cannot meaningfully change the ratio. The XZ-co
 payload (and the CABAC-coded correction stream for preflate paths) is >99.99 % of every
 file we ship.
 
-The v4 bump is deliberately not another dictionary-compaction round. It spends one reserved
-4-bit method slot on `raw-brotli`, a no-dictionary Brotli q11 payload for bounded text-like
-inputs. This is the kind of secondary high-performance bitstream codec that can move a
-payload when the data profile actually matches it: the paper corpus improves from raw-xz
-`20 561` bytes (`0.331549`) to raw-brotli `18 573` bytes (`0.299492`). The same outer-
-compression idea was probed on existing `.zbpk` artifacts: zstd/xz/brotli all lost on
-paper and primary; zstd saved only 58 bytes on the 83 MB depth artifact after wrapper
-overhead would leave a sub-0.0001% gain. Keep outer repacking as a future option only when
-it has a real corpus-level win.
+The v4/v5 bumps are deliberately not another dictionary-compaction round. v4 spends one
+reserved 4-bit method slot on `raw-brotli`, a no-dictionary Brotli q11 payload for bounded
+text-like inputs. This is the kind of secondary high-performance bitstream codec that can
+move a payload when the data profile actually matches it: the paper corpus improves from
+raw-xz `20 561` bytes (`0.331549`) to raw-brotli `18 573` bytes (`0.299492`). v5 adds
+`prime-sequence`, a structural no-payload method for exact fixed-width consecutive-prime
+tables. It is disabled by default because it is corpus-specific enough to distort
+general ratio comparisons; opt-in runs with `ZBIT_ENABLE_PRIME_SEQUENCE=1` compress
+`primary.3b.bin` from the default monotonic-delta `562 799` bytes to `25` bytes
+(`0.000008`). The same outer-compression idea was probed on existing `.zbpk` artifacts:
+zstd/xz/brotli all lost on paper and the former primary monotonic output; zstd saved only
+58 bytes on the 83 MB depth artifact after wrapper overhead would leave a sub-0.0001%
+gain. Keep outer repacking as a future option only when it has a real corpus-level win.
 
 Concretely, the per-corpus ceiling for dictionary compaction is:
 
 | Corpus | Compressed file | Dictionary footprint | Hard ceiling for further header work |
 |---|---:|---:|---:|
 | paper | 18 573 B | ~17 B header, no method dict | < 17 B (4-byte magic, 2-byte version, ...) |
-| primary.3b | 562 799 B | ~17 B header + ~12 B monotonic-delta dict | ~10 B saveable, ~0.002 % ratio |
+| primary.3b | 562 799 B | ~17 B header + ~12 B monotonic dict + compressed gap payload | < 30 B meaningful |
 | cat | 2 670 567 B | ~17 B header + ~25 B recursive fixed + ~15 B framed + ~13 B topology bits | ~50 B saveable, ~0.002 % ratio |
 | depth_anything | ~83 MB | ~17 B header + ~10 B adaptive-xz dict | ~10 B saveable, ~0 % ratio |
 
@@ -62,6 +66,15 @@ items that actually move ratio are payload-level, not header-level.
 
 ## Recent Landed Items
 
+- **2026-07-03 primary structural path (ZBPK v5, opt-in)**. Added `prime-sequence`, a bounded
+  exact detector for fixed-width little-endian tables that are byte-for-byte consecutive
+  primes. The dictionary stores `(width, count, first, last)` and the decoder regenerates
+  with a sieve capped at 64 Mi values. `assets/primary.3b.bin` is exactly the prime table
+  from `2` through `16 777 213`, so opt-in runs move from monotonic-delta `562 799` B
+  to `25` B (`0.000008`), validation PASS. The method is selected only after exact
+  verification, but default balanced runs skip it (`ZBIT_ENABLE_PRIME_SEQUENCE=1` enables
+  it) so cross-file ratio comparisons stay general; non-prime monotonic inputs still use
+  `monotonic-delta`.
 - **2026-07-02 benchmark-runtime pass** (no format change, all tracked output bytes
   identical). Four search-cost cuts plus measurement fixes:
   1. The raw-xz tuning-matrix skip gate (`core.rs`) now considers all structural candidates
@@ -85,15 +98,14 @@ items that actually move ratio are payload-level, not header-level.
   recursive/monotonic/adaptive build time (cat reported 51 s where the true matrix cost
   was ~1.6 s); the winner-refinement time is now included in `recursive transform
   evaluation`; `[profile.dev.package."*"] opt-level = 3` makes `cargo test` run optimized
-  codec dependencies. Balanced results (release-to-release, identical bytes): primary
-  `4.8 s -> 2.7 s`, cat `51.8 s -> 34.3 s`, depth_anything `628 s -> 359 s` (IMMED-5's
+  codec dependencies. Balanced results (release-to-release, identical bytes at the time):
+  primary `4.8 s -> 2.7 s`, cat `51.8 s -> 34.3 s`, depth_anything `628 s -> 359 s` (IMMED-5's
   `< 120 s` target is still open; the remaining depth cost is the adaptive plan search
   itself, not the raw-xz matrix). Raw-brotli additionally probes TEXT vs GENERIC mode in
   parallel (ties on paper; may help other text corpora).
 - **RawBrotli** (new top-level pack method, ZBPK v4) — implemented. It is gated by a cheap
   text-likeness check plus an 8 MiB bound so binary corpora do not pay q11 Brotli cost.
-  Current paper benchmark: `62015 -> 18573`, ratio `0.299492`, validation PASS. Primary
-  remains `monotonic-delta` at `562799`, validation PASS.
+  Current paper benchmark: `62015 -> 18573`, ratio `0.299492`, validation PASS.
 - **N1 row-aware predictors** — implemented (see N1 entry below). Available but does not
   win on already-filtered PNG IDAT data.
 - **N3 per-block transform plans** — implemented (see N3 entry below). Format extension is
@@ -400,9 +412,9 @@ cannot state its worst-case time cost and its skip condition is not landable.**
 | `depth_anything_v2_vits.pth` | `83 380 762` | `400 s` |
 
 Wall budgets are sized to the measured run-to-run spread, not a flat percentage: paper
-~3x its tracked 97 ms (sub-second runs are dominated by startup noise), primary ~1.5x its
-typical 2.7 s (observed 2.67-3.19 s spread; the budget still catches re-enabling the
-raw-xz matrix walk, which costs >= 4.3 s), cat and depth ~10 % over their measurements.
+~3x its tracked 97 ms (sub-second runs are dominated by startup noise), primary keeps the
+default monotonic-delta baseline under a 4 s guard, and cat and depth keep ~10 % headroom
+over their measurements.
 A ratio win may raise a budget only when the same commit re-baselines the table with the
 measured numbers and says why the extra time buys bytes.
 
@@ -427,24 +439,28 @@ measured numbers and says why the extra time buys bytes.
 
 ### Queued ratio candidates, each with its time story
 
-1. **Monotonic gap-stream secondary transform** (primary stretch `< 0.170`). Needs a
-   ZBPK v5 monotonic dictionary slot carrying an optional `(kind, period, head)` plan
-   applied to the gap stream before codec selection. Time cost: plan search over the
-   ~1 MiB gap payload is hundreds of ms and runs **only when monotonic-delta already
-   beat every raw candidate**, so paper/cat/depth pay nothing. Accept: primary bytes
-   `< 562 799`, wall `≤ 3.0 s`.
-2. **Container-aware depth path** (depth stretch `< 0.80`). Parse the PK-ZIP wrapper,
+1. **Primary exact prime-sequence path** — implemented 2026-07-03 as ZBPK v5, but disabled
+   by default. The old monotonic gap-stream stretch is still the default comparison baseline;
+   the corpus-specific exact-prime path is available for opt-in experiments with
+   `ZBIT_ENABLE_PRIME_SEQUENCE=1`. Opt-in result: primary `25` bytes, validation PASS.
+2. **Monotonic gap-stream secondary transform** (generic non-prime monotonic stretch).
+   The ZBPK v5 monotonic dictionary can now carry an optional `(kind, period, head)` plan
+   applied to the gap stream before codec selection, but the search is off for balanced
+   by default because it must prove a general non-prime win before entering the balanced
+   comparison suite. Time cost: plan search over a ~1 MiB gap payload is hundreds of ms
+   and runs only in deep/research when monotonic-delta already beats every raw candidate.
+3. **Container-aware depth path** (depth stretch `< 0.80`). Parse the PK-ZIP wrapper,
    split metadata from tensor bulk, per-entry plan search bounded by sample pre-rank.
    Expected to *reduce* wall time too: many small bounded searches replace one 95 MiB
    search. Accept: depth bytes `< 83 380 762`, wall `≤ 400 s`.
-3. **N4 LZMA delta filter** (lzma-sys raw filter chain; `delta_dist` field already
+4. **N4 LZMA delta filter** (lzma-sys raw filter chain; `delta_dist` field already
    inert in `XzTuningParams`). Admission rule: add delta entries to the matrix **only
    when the existing autocorrelation scan reports a dominant period ∈ {2,3,4,8}**,
    never unconditionally. Accept: bytes down somewhere, cat wall `≤ 38 s`.
-4. **Brotli as inner payload codec** for transformed/gap payloads. Blocked on the
+5. **Brotli as inner payload codec** for transformed/gap payloads. Blocked on the
    saturated 2-bit `PayloadCodec` field — fold the field widening into the same v5 bump
    as (1); probe gated by the same text-likeness + size checks as top-level raw-brotli.
-5. **IMMED-4 typed CABAC substreams** — still blocked on the vendor patch (see IMMED-4);
+6. **IMMED-4 typed CABAC substreams** — still blocked on the vendor patch (see IMMED-4);
    no in-tree path.
 
 ### Harness item — implemented 2026-07-02
@@ -642,7 +658,7 @@ engineering; modest gain unless preflate is producing redundant references.
 | Corpus | Current | N1 measured | N2/N3 measured | AdaptiveTransformedXz measured | Pre-atlas stretch |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `papers/zbit-algorithmsResearch.md` | `0.331855` | unchanged | unchanged | skipped (size gate) | `< 0.325` (BWT preproc) |
-| `assets/primary.3b.bin` | `0.174058` | unchanged | unchanged | skipped (raw-xz gate) | `< 0.170` (gap-stream secondary transform) |
+| `assets/primary.3b.bin` | `0.174046` | n/a | n/a | skipped (raw-xz gate) | opt-in `prime-sequence` reaches `0.000008`; default target is a general win |
 | cat normal | `0.899412` | unchanged | unchanged (single-plan wins) | skipped (recursive gate) | `< 0.870` |
 | cat stream wide-overfit | `0.899455` | unchanged | unchanged | n/a (stream path) | `< 0.872` |
 | `depth_anything_v2_vits.pth` | raw-xz `0.911471` | n/a | n/a | **`0.840376`** (selected) | `< 0.80` (container-aware) |
@@ -695,7 +711,7 @@ Current tracked benchmark snapshot:
 | Corpus / mode | Selected method | Original bytes | Compressed bytes | Ratio | Main bottleneck |
 | --- | ---: | ---: | ---: | ---: | --- |
 | `papers/zbit-algorithmsResearch.md` | `raw-xz` | `62,015` | `20,632` | `0.332694` | generic text codec selection |
-| `assets/primary.3b.bin` | `monotonic-delta` | `3,233,613` | `562,836` | `0.174058` | framed scan overhead, not ratio |
+| `assets/primary.3b.bin` | `monotonic-delta` | `3,233,613` | `562,799` | `0.174046` | default general numeric stream path |
 | cat challenge normal | `recursive-circuit-xz` | `2,969,404` | `2,670,718` | `0.899412` | preflate + transformed payload coding |
 | cat challenge stream wide/shared | global/slice recursive pack | `2,969,404` | `2,670,846` | `0.899455` | global payload construction and validation |
 
@@ -1640,7 +1656,7 @@ Initial realistic targets:
 | --- | ---: | ---: | ---: |
 | cat challenge normal | `0.899412` | `< 0.890` | `< 0.875` |
 | cat challenge stream non-wide atlas | `0.899455` with global/slice | `< 0.905` without global output slice | `< 0.890` without global output slice |
-| `primary.3b.bin` | `0.174058` | no regression | `< 0.170` |
+| `primary.3b.bin` | `0.174046` | no regression | general non-prime numeric win |
 | paper markdown | `0.332694` | no regression | `< 0.320` |
 | distant-repeat synthetic | new | beat zstd/xz by clear margin | near reference+patch theoretical cost |
 

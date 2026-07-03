@@ -22,7 +22,39 @@ fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static PRIME_SEQUENCE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct PrimeSequenceEnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        old_value: Option<std::ffi::OsString>,
+    }
+
+    impl PrimeSequenceEnvGuard {
+        fn set(value: Option<&str>) -> Self {
+            let lock = PRIME_SEQUENCE_ENV_LOCK.lock().expect("prime env lock");
+            let old_value = std::env::var_os("ZBIT_ENABLE_PRIME_SEQUENCE");
+            match value {
+                Some(value) => std::env::set_var("ZBIT_ENABLE_PRIME_SEQUENCE", value),
+                None => std::env::remove_var("ZBIT_ENABLE_PRIME_SEQUENCE"),
+            }
+            Self {
+                _lock: lock,
+                old_value,
+            }
+        }
+    }
+
+    impl Drop for PrimeSequenceEnvGuard {
+        fn drop(&mut self) {
+            match self.old_value.as_ref() {
+                Some(value) => std::env::set_var("ZBIT_ENABLE_PRIME_SEQUENCE", value),
+                None => std::env::remove_var("ZBIT_ENABLE_PRIME_SEQUENCE"),
+            }
+        }
+    }
 
     fn append_crc_frame(out: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
         push_u32_be(out, data.len() as u32);
@@ -274,6 +306,68 @@ mod tests {
             stats.chosen_method
         );
         assert!(stats.compressed_size <= stats.raw_candidate_bytes);
+        assert!(stats.monotonic_delta_candidate_bytes.is_some());
+    }
+
+    #[test]
+    fn adaptive_pack_can_choose_prime_sequence_and_roundtrip() {
+        let _prime_env = PrimeSequenceEnvGuard::set(Some("1"));
+        let prime_flags = sieve_prime_flags(20_000);
+        let mut input = Vec::new();
+        for value in 2usize..prime_flags.len() {
+            if prime_flags[value] {
+                write_le_u64_width(&mut input, value as u64, 3).expect("write u24 prime");
+            }
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("zbit_pack_primes_{stamp}.zbpk"));
+
+        let stats = compress_adaptive_to_file(&input, &path).expect("compress adaptive");
+        let output = decompress_file(&path).expect("decompress adaptive");
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(output, input);
+        assert!(
+            matches!(stats.chosen_method, PackMethod::PrimeSequence),
+            "expected prime-sequence to be chosen, got {:?}",
+            stats.chosen_method
+        );
+        assert!(stats.prime_sequence_candidate_bytes.is_some());
+        assert!(stats.compressed_size < stats.monotonic_delta_candidate_bytes.unwrap_or(usize::MAX));
+    }
+
+    #[test]
+    fn adaptive_pack_skips_prime_sequence_by_default() {
+        let _prime_env = PrimeSequenceEnvGuard::set(None);
+        let prime_flags = sieve_prime_flags(20_000);
+        let mut input = Vec::new();
+        for value in 2usize..prime_flags.len() {
+            if prime_flags[value] {
+                write_le_u64_width(&mut input, value as u64, 3).expect("write u24 prime");
+            }
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("zbit_pack_primes_default_{stamp}.zbpk"));
+
+        let stats = compress_adaptive_to_file(&input, &path).expect("compress adaptive");
+        let output = decompress_file(&path).expect("decompress adaptive");
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(output, input);
+        assert!(
+            !matches!(stats.chosen_method, PackMethod::PrimeSequence),
+            "prime-sequence should be opt-in, got {:?}",
+            stats.chosen_method
+        );
+        assert!(stats.prime_sequence_candidate_bytes.is_none());
         assert!(stats.monotonic_delta_candidate_bytes.is_some());
     }
 

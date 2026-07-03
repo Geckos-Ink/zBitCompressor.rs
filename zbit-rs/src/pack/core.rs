@@ -23,7 +23,7 @@ use xz2::write::XzEncoder as XzWriterEncoder;
 use zstd::stream as zstd_stream;
 
 pub const ZBPK_MAGIC: u32 = 0x5A42_504B; // "ZBPK"
-pub const ZBPK_VERSION: u16 = 4;
+pub const ZBPK_VERSION: u16 = 5;
 // Upper bound used for candidate-size estimation. The actual header is variable-length:
 //   magic u32 (4) + version u16 (2) + flags u16 (2) + packed method-and-bits u8 (1)
 //   + varint unique_count + varint original_size + varint dict_size + varint payload_size.
@@ -122,6 +122,15 @@ impl CompressionProfile {
         }
     }
 
+    fn monotonic_gap_transform_plan_budget(self) -> usize {
+        match self {
+            Self::Fast => 0,
+            Self::Balanced => 0,
+            Self::Deep => 8,
+            Self::Research => 12,
+        }
+    }
+
     fn enable_xz_extreme_for_raw_xz(self) -> bool {
         !matches!(self, Self::Fast)
     }
@@ -207,6 +216,17 @@ impl CompressionProfile {
             Self::Deep | Self::Research => 0,
         }
     }
+}
+
+fn should_evaluate_prime_sequence() -> bool {
+    std::env::var("ZBIT_ENABLE_PRIME_SEQUENCE")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -303,6 +323,7 @@ pub struct PackStats {
     pub framed_raw_candidate_bytes: Option<usize>,
     pub recursive_circuit_xz_candidate_bytes: Option<usize>,
     pub monotonic_delta_candidate_bytes: Option<usize>,
+    pub prime_sequence_candidate_bytes: Option<usize>,
     pub adaptive_transformed_xz_candidate_bytes: Option<usize>,
 
     pub chosen_method: PackMethod,
@@ -651,8 +672,17 @@ struct MonotonicDeltaStream {
     transformed_plain_len: usize,
     mode: MonotonicDeltaMode,
     trailing_zero_shift: u8,
+    transform_plan: Option<CircuitTransformPlan>,
     codec: PayloadCodec,
     payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct PrimeSequenceStream {
+    width: u8,
+    count: u64,
+    first_value: u64,
+    last_value: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -1280,6 +1310,7 @@ fn write_pack_bytes(
     framed_run: Option<&FramedPayloadRun>,
     recursive_stream: Option<&RecursiveCircuitStream>,
     monotonic_stream: Option<&MonotonicDeltaStream>,
+    prime_sequence_stream: Option<&PrimeSequenceStream>,
     adaptive_xz_stream: Option<&AdaptiveTransformedXzStream>,
 ) -> ZbitResult<Vec<u8>> {
     if stream.unique_symbols.len() > u16::MAX as usize {
@@ -1373,6 +1404,19 @@ fn write_pack_bytes(
                 monotonic.payload.len(),
             )
         }
+        PackMethod::PrimeSequence => {
+            let prime_sequence = prime_sequence_stream.ok_or_else(|| {
+                ZbitError::Internal(
+                    "prime-sequence stream missing for prime-sequence method".to_string(),
+                )
+            })?;
+            (
+                0u8,
+                0usize,
+                prime_sequence_dictionary_size(prime_sequence),
+                0usize,
+            )
+        }
         PackMethod::AdaptiveTransformedXz => {
             let adaptive = adaptive_xz_stream.ok_or_else(|| {
                 ZbitError::Internal(
@@ -1391,7 +1435,8 @@ fn write_pack_bytes(
 
     let mut out = Vec::with_capacity(ZBPK_HEADER_BYTES + dict_size + payload_size);
 
-    // v4 header layout (same packed fields as v3; v4 adds a raw-brotli method slot):
+    // v5 header layout (same packed fields as v4; v5 adds the opt-in prime-sequence
+    // method and optional monotonic gap-stream transform metadata):
     //   magic u32        — wire-stable
     //   version u16      — wire-stable
     //   flags u16        — reserved, MUST be 0
@@ -1468,6 +1513,14 @@ fn write_pack_bytes(
         | PackMethod::RawZstd
         | PackMethod::RawBrotli
         | PackMethod::RawXz => {}
+        PackMethod::PrimeSequence => {
+            let prime_sequence = prime_sequence_stream.ok_or_else(|| {
+                ZbitError::Internal(
+                    "prime-sequence stream missing for prime-sequence dictionary".to_string(),
+                )
+            })?;
+            write_prime_sequence_dictionary(&mut out, prime_sequence);
+        }
         PackMethod::FramedRaw => {
             let run = framed_run.ok_or_else(|| {
                 ZbitError::Internal("framed-run missing for framed-raw dictionary".to_string())
@@ -1565,6 +1618,7 @@ fn write_pack_bytes(
             })?;
             out.extend_from_slice(&monotonic.payload);
         }
+        PackMethod::PrimeSequence => {}
         PackMethod::AdaptiveTransformedXz => {
             let adaptive = adaptive_xz_stream.ok_or_else(|| {
                 ZbitError::Internal(
@@ -1721,7 +1775,38 @@ fn compress_adaptive_to_bytes_inner(
             + recursive.transformed_encoded_len
             + recursive.correction_encoded_len
     });
-    let monotonic_stream = build_monotonic_delta_stream(input, &mut context)?;
+    let best_prelude_candidate_bytes = [
+        Some(raw_candidate_bytes),
+        Some(indexed_raw_candidate_bytes),
+        indexed_huffman_candidate_bytes,
+        raw_deflate_candidate_bytes,
+        raw_zstd_candidate_bytes,
+        raw_brotli_candidate_bytes,
+        Some(ZBPK_HEADER_BYTES + raw_xz_cheap_size),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+    let prime_sequence_stream = if should_evaluate_prime_sequence() {
+        build_prime_sequence_stream(input)?
+    } else {
+        context.push_skipped(
+            "prime-sequence skipped: disabled by default; set ZBIT_ENABLE_PRIME_SEQUENCE=1 \
+             to enable exact prime-table detection",
+        );
+        None
+    };
+    let prime_sequence_candidate_bytes = prime_sequence_stream
+        .as_ref()
+        .map(|stream| ZBPK_HEADER_BYTES + prime_sequence_dictionary_size(stream));
+    let monotonic_stream = if prime_sequence_stream.is_some() {
+        context.push_skipped(
+            "monotonic-delta skipped: exact prime-sequence candidate covers numeric table",
+        );
+        None
+    } else {
+        build_monotonic_delta_stream(input, &mut context, best_prelude_candidate_bytes)?
+    };
     let monotonic_delta_candidate_bytes = monotonic_stream.as_ref().map(|stream| {
         ZBPK_HEADER_BYTES + monotonic_delta_dictionary_size(stream) + stream.payload.len()
     });
@@ -1754,6 +1839,7 @@ fn compress_adaptive_to_bytes_inner(
     let best_structural_total = [
         recursive_circuit_xz_candidate_bytes,
         monotonic_delta_candidate_bytes,
+        prime_sequence_candidate_bytes,
         adaptive_transformed_xz_candidate_bytes,
     ]
     .into_iter()
@@ -1821,6 +1907,7 @@ fn compress_adaptive_to_bytes_inner(
     eval.framed_raw_total_bytes = framed_raw_candidate_bytes;
     eval.recursive_circuit_xz_total_bytes = recursive_circuit_xz_candidate_bytes;
     eval.monotonic_delta_total_bytes = monotonic_delta_candidate_bytes;
+    eval.prime_sequence_total_bytes = prime_sequence_candidate_bytes;
     eval.adaptive_transformed_xz_total_bytes = adaptive_transformed_xz_candidate_bytes;
 
     let (should_eval_circuit, circuit_rule_note) = should_evaluate_circuit(&eval);
@@ -1854,6 +1941,7 @@ fn compress_adaptive_to_bytes_inner(
         framed_run.as_ref(),
         recursive_stream.as_ref(),
         monotonic_stream.as_ref(),
+        prime_sequence_stream.as_ref(),
         adaptive_xz_stream.as_ref(),
     )?;
 
@@ -1901,6 +1989,7 @@ fn compress_adaptive_to_bytes_inner(
             })?;
             (0u8, monotonic.payload.len(), 0usize)
         }
+        PackMethod::PrimeSequence => (0u8, 0usize, 0usize),
         PackMethod::AdaptiveTransformedXz => {
             let adaptive = adaptive_xz_stream.as_ref().ok_or_else(|| {
                 ZbitError::Internal(
@@ -1943,6 +2032,7 @@ fn compress_adaptive_to_bytes_inner(
         framed_raw_candidate_bytes,
         recursive_circuit_xz_candidate_bytes,
         monotonic_delta_candidate_bytes,
+        prime_sequence_candidate_bytes,
         adaptive_transformed_xz_candidate_bytes,
         chosen_method: eval.chosen_method,
         chosen_reason: eval.chosen_reason,
@@ -2003,7 +2093,7 @@ fn decompress_pack_bytes(bytes: &[u8]) -> ZbitResult<Vec<u8>> {
     }
 
     let version = read_u16(&bytes, &mut cursor)?;
-    if version != ZBPK_VERSION {
+    if !(4..=ZBPK_VERSION).contains(&version) {
         return Err(ZbitError::Parse(format!(
             "unsupported ZBPK version: {version}"
         )));
@@ -2124,6 +2214,14 @@ fn decompress_pack_bytes(bytes: &[u8]) -> ZbitResult<Vec<u8>> {
             }
             return decode_monotonic_delta_payload(dict, payload, original_size);
         }
+        PackMethod::PrimeSequence => {
+            if bits_per_symbol != 0 || unique_count != 0 {
+                return Err(ZbitError::Parse(
+                    "prime-sequence requires bits_per_symbol=0 and unique_count=0".to_string(),
+                ));
+            }
+            return decode_prime_sequence_payload(dict, payload, original_size);
+        }
         PackMethod::AdaptiveTransformedXz => {
             if bits_per_symbol != 0 || unique_count != 0 {
                 return Err(ZbitError::Parse(
@@ -2164,6 +2262,7 @@ fn decompress_pack_bytes(bytes: &[u8]) -> ZbitResult<Vec<u8>> {
         | PackMethod::FramedRaw
         | PackMethod::RecursiveCircuitXz
         | PackMethod::MonotonicDelta
+        | PackMethod::PrimeSequence
         | PackMethod::AdaptiveTransformedXz => {
             unreachable!()
         }

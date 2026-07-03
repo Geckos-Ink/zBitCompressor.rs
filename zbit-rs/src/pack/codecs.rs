@@ -292,7 +292,7 @@ fn encode_trailing_zero_gap_bytes(gaps: &[u64], shift: u8) -> Option<Vec<u8>> {
     Some(out)
 }
 
-// v3 dictionary layout for MonotonicDelta (variable length, typically ~10-15 B):
+// v5 dictionary layout for MonotonicDelta (variable length, typically ~10-18 B):
 //   meta u8           bits 0..2 = width (1..=8 maps to 0..=7 via `width - 1`)
 //                     bits 3..5 = mode  (5 modes fit in 3 bits)
 //                     bits 6..7 = codec (4 values fit in 2 bits)
@@ -301,15 +301,23 @@ fn encode_trailing_zero_gap_bytes(gaps: &[u64], shift: u8) -> Option<Vec<u8>> {
 //   varint count
 //   varint first_value
 //   varint transformed_plain_len
+//   optional transform plan:
+//     kind_index u8   6 low bits used, via the compact transform-kind table
+//     varint period
+//     varint head
 // Replaces the prior fixed 28-byte layout. For typical primary.3b-style payloads
 // (count ~1 M, gaps small) the new dictionary is ~12 bytes — savings on this corpus
 // matter less in ratio because the file is already 0.174, but the principle is the
 // same as the other dictionaries: spend only the bits each enumeration value needs.
 fn monotonic_delta_dictionary_size(stream: &MonotonicDeltaStream) -> usize {
+    let transform_plan_size = stream.transform_plan.map_or(0, |plan| {
+        1 + varint_u64_len(plan.period as u64) + varint_u64_len(plan.head as u64)
+    });
     1 /* meta */ + 1 /* shift */
         + varint_u64_len(stream.count)
         + varint_u64_len(stream.first_value)
         + varint_u64_len(stream.transformed_plain_len as u64)
+        + transform_plan_size
 }
 
 // v3 dictionary layout for AdaptiveTransformedXz (variable length, typically ~7-10 B):
@@ -401,11 +409,19 @@ fn write_monotonic_delta_dictionary(out: &mut Vec<u8>, stream: &MonotonicDeltaSt
     push_varint_u64(out, stream.count);
     push_varint_u64(out, stream.first_value);
     push_varint_u64(out, stream.transformed_plain_len as u64);
+    if let Some(plan) = stream.transform_plan {
+        let kind_u8 = plan.kind.as_u8();
+        let kind_index = kind_to_compact_index(kind_u8).unwrap_or(kind_u8 & 0x3F);
+        out.push(kind_index & 0x3F);
+        push_varint_u64(out, plan.period as u64);
+        push_varint_u64(out, plan.head as u64);
+    }
 }
 
 fn build_monotonic_delta_stream(
     input: &[u8],
     context: &mut CompressionContext,
+    best_prelude_candidate_bytes: Option<usize>,
 ) -> ZbitResult<Option<MonotonicDeltaStream>> {
     let candidate_widths = [3usize, 4, 2, 5, 6, 7, 8, 1];
     let mut best: Option<(MonotonicDeltaStream, usize)> = None;
@@ -479,6 +495,7 @@ fn build_monotonic_delta_stream(
                 transformed_plain_len: transformed.len(),
                 mode,
                 trailing_zero_shift: shift,
+                transform_plan: None,
                 codec,
                 payload,
             };
@@ -490,7 +507,72 @@ fn build_monotonic_delta_stream(
         }
     }
 
-    Ok(best.map(|(stream, _)| stream))
+    let Some((mut stream, base_size)) = best else {
+        return Ok(None);
+    };
+
+    let Some(best_prelude_total) = best_prelude_candidate_bytes else {
+        context.push_skipped(
+            "monotonic gap transform skipped: no raw/prelude candidate total available",
+        );
+        return Ok(Some(stream));
+    };
+    if ZBPK_HEADER_BYTES + base_size >= best_prelude_total {
+        context.push_skipped(format!(
+            "monotonic gap transform skipped: base monotonic total {} does not beat best prelude total {}",
+            ZBPK_HEADER_BYTES + base_size,
+            best_prelude_total
+        ));
+        return Ok(Some(stream));
+    }
+
+    let plan_budget = context.profile.monotonic_gap_transform_plan_budget();
+    if plan_budget == 0 {
+        context.push_skipped(format!(
+            "monotonic gap transform skipped by '{}' profile",
+            context.profile.name()
+        ));
+        return Ok(Some(stream));
+    }
+
+    let decoded_gap_stream =
+        decode_with_codec(&stream.payload, stream.codec, stream.transformed_plain_len)?;
+    let candidate =
+        choose_adaptive_transform_plan(&decoded_gap_stream, context.profile, plan_budget)?;
+    let identity_plan = CircuitTransformPlan {
+        kind: CircuitTransformKind::Identity,
+        period: 0,
+        head: 0,
+    };
+    let candidate_transform_plan = if candidate.plan == identity_plan {
+        None
+    } else {
+        Some(candidate.plan)
+    };
+    let candidate_stream = MonotonicDeltaStream {
+        width: stream.width,
+        count: stream.count,
+        first_value: stream.first_value,
+        transformed_plain_len: stream.transformed_plain_len,
+        mode: stream.mode,
+        trailing_zero_shift: stream.trailing_zero_shift,
+        transform_plan: candidate_transform_plan,
+        codec: candidate.codec,
+        payload: candidate.payload,
+    };
+    let candidate_size =
+        monotonic_delta_dictionary_size(&candidate_stream) + candidate_stream.payload.len();
+    if candidate_size < base_size {
+        stream = candidate_stream;
+    } else {
+        context.push_skipped(format!(
+            "monotonic gap transform rejected: transformed total {} does not beat base {}",
+            ZBPK_HEADER_BYTES + candidate_size,
+            ZBPK_HEADER_BYTES + base_size
+        ));
+    }
+
+    Ok(Some(stream))
 }
 
 fn decode_monotonic_delta_payload(
@@ -520,12 +602,32 @@ fn decode_monotonic_delta_payload(
     let count = read_varint_u64(dict_bytes, &mut dict_cursor)? as usize;
     let first_value = read_varint_u64(dict_bytes, &mut dict_cursor)?;
     let transformed_plain_len = read_varint_u64(dict_bytes, &mut dict_cursor)? as usize;
-
-    if dict_cursor != dict_bytes.len() {
-        return Err(ZbitError::Parse(
-            "trailing bytes in monotonic-delta dictionary".to_string(),
-        ));
-    }
+    let transform_plan = if dict_cursor == dict_bytes.len() {
+        None
+    } else {
+        let kind_index = read_u8(dict_bytes, &mut dict_cursor)?;
+        if kind_index & 0xC0 != 0 {
+            return Err(ZbitError::Parse(
+                "monotonic-delta transform kind reserves the top 2 bits".to_string(),
+            ));
+        }
+        let kind_u8 = compact_index_to_kind(kind_index).ok_or_else(|| {
+            ZbitError::Parse(format!(
+                "monotonic-delta transform has invalid kind index {kind_index}"
+            ))
+        })?;
+        let kind = CircuitTransformKind::from_u8(kind_u8).ok_or_else(|| {
+            ZbitError::Parse("monotonic-delta transform has invalid kind".to_string())
+        })?;
+        let period = read_varint_u64(dict_bytes, &mut dict_cursor)? as u32;
+        let head = read_varint_u64(dict_bytes, &mut dict_cursor)? as u32;
+        if dict_cursor != dict_bytes.len() {
+            return Err(ZbitError::Parse(
+                "trailing bytes in monotonic-delta dictionary".to_string(),
+            ));
+        }
+        Some(CircuitTransformPlan { kind, period, head })
+    };
     if width == 0 || width > 8 {
         return Err(ZbitError::Parse(
             "monotonic-delta width must be between 1 and 8".to_string(),
@@ -549,7 +651,22 @@ fn decode_monotonic_delta_payload(
         ));
     }
 
-    let transformed = decode_with_codec(payload, codec, transformed_plain_len)?;
+    let mut transformed = decode_with_codec(payload, codec, transformed_plain_len)?;
+    if let Some(plan) = transform_plan {
+        transformed = invert_transform_plan(&transformed, transformed_plain_len, &plan).ok_or_else(
+            || {
+                ZbitError::Parse(
+                    "monotonic-delta inverse gap transform produced invalid output".to_string(),
+                )
+            },
+        )?;
+        if transformed.len() != transformed_plain_len {
+            return Err(ZbitError::Parse(format!(
+                "monotonic-delta inverse gap transform length mismatch: expected {transformed_plain_len} got {}",
+                transformed.len()
+            )));
+        }
+    }
     let mut transformed_cursor = 0usize;
     let max_value = max_value_for_width(width).ok_or_else(|| {
         ZbitError::Parse("monotonic-delta width does not have a valid value range".to_string())
@@ -653,6 +770,173 @@ fn decode_monotonic_delta_payload(
         )));
     }
 
+    Ok(out)
+}
+
+const PRIME_SEQUENCE_MAX_SIEVE_VALUE: u64 = 64 * 1024 * 1024;
+
+fn prime_sequence_dictionary_size(stream: &PrimeSequenceStream) -> usize {
+    1 + varint_u64_len(stream.count)
+        + varint_u64_len(stream.first_value)
+        + varint_u64_len(stream.last_value)
+}
+
+fn write_prime_sequence_dictionary(out: &mut Vec<u8>, stream: &PrimeSequenceStream) {
+    out.push(stream.width);
+    push_varint_u64(out, stream.count);
+    push_varint_u64(out, stream.first_value);
+    push_varint_u64(out, stream.last_value);
+}
+
+fn sieve_prime_flags(limit: usize) -> Vec<bool> {
+    let mut prime = vec![true; limit.saturating_add(1)];
+    if !prime.is_empty() {
+        prime[0] = false;
+    }
+    if prime.len() > 1 {
+        prime[1] = false;
+    }
+
+    let mut p = 2usize;
+    while p.saturating_mul(p) <= limit {
+        if prime[p] {
+            let mut multiple = p * p;
+            while multiple <= limit {
+                prime[multiple] = false;
+                multiple += p;
+            }
+        }
+        p += 1;
+    }
+    prime
+}
+
+fn build_prime_sequence_stream(input: &[u8]) -> ZbitResult<Option<PrimeSequenceStream>> {
+    let candidate_widths = [3usize, 4, 2, 5, 6, 7, 8, 1];
+    for width in candidate_widths {
+        if input.is_empty() || input.len() < width || (input.len() % width) != 0 {
+            continue;
+        }
+        let count = input.len() / width;
+        let first = read_le_u64_width(&input[..width], width).ok_or_else(|| {
+            ZbitError::Internal("prime-sequence first value width is invalid".to_string())
+        })?;
+        let last_start = input.len() - width;
+        let last = read_le_u64_width(&input[last_start..], width).ok_or_else(|| {
+            ZbitError::Internal("prime-sequence last value width is invalid".to_string())
+        })?;
+        if first < 2 || last < first || last > PRIME_SEQUENCE_MAX_SIEVE_VALUE {
+            continue;
+        }
+
+        let prime = sieve_prime_flags(last as usize);
+        if !prime.get(first as usize).copied().unwrap_or(false)
+            || !prime.get(last as usize).copied().unwrap_or(false)
+        {
+            continue;
+        }
+
+        let mut cursor = 0usize;
+        let mut matched = 0usize;
+        let mut valid = true;
+        for value in first as usize..=last as usize {
+            if !prime[value] {
+                continue;
+            }
+            if cursor + width > input.len() {
+                valid = false;
+                break;
+            }
+            let encoded = read_le_u64_width(&input[cursor..cursor + width], width).ok_or_else(
+                || ZbitError::Internal("prime-sequence value width is invalid".to_string()),
+            )?;
+            if encoded != value as u64 {
+                valid = false;
+                break;
+            }
+            cursor += width;
+            matched += 1;
+        }
+
+        if valid && cursor == input.len() && matched == count {
+            return Ok(Some(PrimeSequenceStream {
+                width: width as u8,
+                count: count as u64,
+                first_value: first,
+                last_value: last,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+fn decode_prime_sequence_payload(
+    dict_bytes: &[u8],
+    payload: &[u8],
+    original_size: usize,
+) -> ZbitResult<Vec<u8>> {
+    if !payload.is_empty() {
+        return Err(ZbitError::Parse(
+            "prime-sequence payload must be empty".to_string(),
+        ));
+    }
+
+    let mut cursor = 0usize;
+    let width = read_u8(dict_bytes, &mut cursor)? as usize;
+    let count = read_varint_u64(dict_bytes, &mut cursor)? as usize;
+    let first = read_varint_u64(dict_bytes, &mut cursor)?;
+    let last = read_varint_u64(dict_bytes, &mut cursor)?;
+    if cursor != dict_bytes.len() {
+        return Err(ZbitError::Parse(
+            "trailing bytes in prime-sequence dictionary".to_string(),
+        ));
+    }
+    if width == 0 || width > 8 {
+        return Err(ZbitError::Parse(
+            "prime-sequence width must be between 1 and 8".to_string(),
+        ));
+    }
+    if count.checked_mul(width) != Some(original_size) {
+        return Err(ZbitError::Parse(
+            "prime-sequence count/width does not match original size".to_string(),
+        ));
+    }
+    if first < 2 || last < first || last > PRIME_SEQUENCE_MAX_SIEVE_VALUE {
+        return Err(ZbitError::Parse(
+            "prime-sequence dictionary values exceed supported bounds".to_string(),
+        ));
+    }
+    let max_value = max_value_for_width(width).ok_or_else(|| {
+        ZbitError::Parse("prime-sequence width does not have a valid value range".to_string())
+    })?;
+    if last > max_value {
+        return Err(ZbitError::Parse(
+            "prime-sequence last value exceeds width capacity".to_string(),
+        ));
+    }
+
+    let prime = sieve_prime_flags(last as usize);
+    if !prime.get(first as usize).copied().unwrap_or(false)
+        || !prime.get(last as usize).copied().unwrap_or(false)
+    {
+        return Err(ZbitError::Parse(
+            "prime-sequence endpoints must be prime".to_string(),
+        ));
+    }
+    let mut out = Vec::with_capacity(original_size);
+    let mut emitted = 0usize;
+    for value in first as usize..=last as usize {
+        if prime[value] {
+            write_le_u64_width(&mut out, value as u64, width)?;
+            emitted += 1;
+        }
+    }
+    if emitted != count || out.len() != original_size {
+        return Err(ZbitError::Parse(
+            "prime-sequence dictionary does not describe the requested prime count".to_string(),
+        ));
+    }
     Ok(out)
 }
 

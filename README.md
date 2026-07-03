@@ -297,21 +297,23 @@ bash zbit-rs/scripts/benchmark_cat_challenge_stream_multilevel.sh
 
 ## Latest Benchmark Result Files
 
-Current snapshot (non-stream reports refreshed on 2026-07-02 with **release builds** — see the timing note below; stream reports kept from 2026-05-23):
+Current snapshot (primary refreshed on 2026-07-03 after disabling prime-sequence by default; other non-stream reports refreshed on 2026-07-02 with **release builds** — see the timing note below; stream reports kept from 2026-05-23):
 
 ### Latest Single-Run Benchmarks
 
 | Test | Input | Selected method/profile | Original -> Compressed (bytes) | Ratio | Savings | Compression ms | Decompression ms | Validation |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Paper benchmark | `papers/zbit-algorithmsResearch.md` | `raw-brotli` | `62015 -> 18573` | `0.299492` | `70.05%` | `96.723` | `1.825` | `PASS` |
-| Primary binary benchmark | `assets/primary.3b.bin` | `monotonic-delta` | `3233613 -> 562799` | `0.174046` | `82.60%` | `2716.613` | `28.765` | `PASS` |
+| Primary binary benchmark | `assets/primary.3b.bin` | `monotonic-delta` | `3233613 -> 562799` | `0.174046` | `82.60%` | `3271.924` | `33.379` | `PASS` |
 | Cat challenge benchmark | `assets/cat_challenge.png` | `recursive-circuit-xz` | `2969404 -> 2670567` | `0.899361` | `10.06%` | `34343.559` | `506.423` | `PASS` |
 | Cat challenge stream benchmark | `assets/cat_challenge.png` | `wide-overfit stream` | `2969404 -> 2670846` | `0.899455` | `10.05%` | `112964.407` | `8186.741` | `PASS` |
 | Depth Anything model benchmark | `assets/depth_anything_v2_vits.pth` | `adaptive-transformed-xz` | `99218434 -> 83380762` | `0.840376` | `15.96%` | `359490.041` | `220.875` | `PASS` |
 
 `raw-brotli` is now available for bounded text-like inputs and moves the paper benchmark from `20561` bytes (`raw-xz`, ratio `0.331549`) to `18573` bytes (ratio `0.299492`). The candidate is gated by a cheap text-likeness check so binary corpora such as `primary.3b`, cat, and depth_anything do not pay the q11 Brotli search cost. Outer recompression of `.zbpk` artifacts was also probed: it lost on paper/primary and saved only 58 bytes on the 83 MB depth artifact with zstd, so it is documented but not promoted into the live format yet.
 
-Compression times remain substantially lower than the 2026-05-07 snapshot on the structural paths: primary `16 635 ms -> 9 803 ms`, cat `112 500 ms -> 60 747 ms`, and depth_anything `5 429 743 ms -> 628 278 ms`. Cat ratio improved slightly (`0.899412 -> 0.899361`, 151 bytes saved cumulatively across the v3 dictionary compaction). The structural-speed improvements come from (a) a cheap XZ-3 ranking pass before the expensive `choose_best_codec` evaluation, (b) a leaner per-plan winner-refinement tuning matrix, (c) a bounded framed-payload analyzer, (d) a tuned-XZ cache, and (e) a runtime gate that skips the full raw-xz tuning matrix when a cheap XZ-3 estimate plus adaptive-transformed-xz prove raw-xz cannot win.
+`prime-sequence` is a ZBPK v5 structural method for fixed-width little-endian tables that are exactly consecutive primes. It stores only `(width, count, first, last)` and regenerates the table with a bounded sieve during decode. The detector only accepts a byte-for-byte consecutive-prime table, but it is disabled by default because it makes cross-file ratio comparisons misleading; set `ZBIT_ENABLE_PRIME_SEQUENCE=1` to evaluate it. In opt-in runs, `assets/primary.3b.bin` moves from the default `562799` bytes to `25` bytes with validation PASS.
+
+Compression times remain substantially lower than the 2026-05-07 snapshot on the structural paths: primary `16 635 ms -> 3 272 ms`, cat `112 500 ms -> 60 747 ms`, and depth_anything `5 429 743 ms -> 628 278 ms`. Cat ratio improved slightly (`0.899412 -> 0.899361`, 151 bytes saved cumulatively across the v3 dictionary compaction). The structural-speed improvements come from (a) a cheap XZ-3 ranking pass before the expensive `choose_best_codec` evaluation, (b) a leaner per-plan winner-refinement tuning matrix, (c) a bounded framed-payload analyzer, (d) a tuned-XZ cache, and (e) a runtime gate that skips the full raw-xz tuning matrix when a cheap XZ-3 estimate plus adaptive-transformed-xz prove raw-xz cannot win.
 
 **2026-07-02 runtime pass (no ratio change, all bytes identical):** the non-stream benchmark timings above are measured with release builds — the benchmark scripts previously ran the default debug profile, which roughly doubled cat wall time (release alone: cat `94.5 s -> 51.8 s` on the same machine, identical output bytes). On top of that, four search-cost fixes landed: (a) the raw-xz tuning-matrix skip gate now also considers the structural candidates (recursive-circuit-xz, monotonic-delta), tiered by a cheap preset-3 bound and, in the borderline band, a single easy XZ-9 probe — primary and cat no longer walk the matrix at all; (b) the ~27 unconditionally forced transform-plan variants are pre-ranked on the existing cheap sample and only a profile-bounded top slice (balanced: 4) pays the full-data XZ-3 ranking encode — deep/research keep the full set; (c) the winner tuned-XZ refinement drops the extreme-preset entries on fast/balanced (they doubled refinement wall time and never beat the plain preset-9 variants on a transformed payload); (d) the prelude candidates (index/huffman/deflate/zstd/brotli/cheap-xz) run concurrently. Net effect at balanced: primary `4.8 s -> 2.7 s`, cat `51.8 s -> 34.3 s` release-to-release, depth_anything `628 s -> 359 s` (same script, both release; identical output bytes `83380762`). The `raw-xz encode` timing field previously absorbed the recursive/monotonic/adaptive build time (it reported 51 s on cat where the real matrix cost was ~1.6 s); it now reports only the cheap estimate plus the probe/matrix work. `cargo test` also got faster: dependencies (xz2, zstd, brotli, preflate-rs) are now compiled optimized in dev/test builds via a `[profile.dev.package."*"]` override.
 
@@ -321,7 +323,7 @@ The N3 multi-block recursive-circuit path is also landed (deep/research only): t
 
 A new top-level pack method `adaptive-transformed-xz` brings the same reversible-transform search to inputs that are *not* framed deflate (e.g. PyTorch `.pth` model files, raw float-tensor dumps). It runs `choose_adaptive_transform_plan` on the raw input, encodes the best transformed payload with the full codec/tuned-XZ selection, and stores a small 18-byte dictionary `(transform_kind, period, head, codec, plain_len)` so the decoder can invert the transform deterministically. Two cost gates keep it bounded: skip when recursive-circuit-xz already covers the same search; skip when raw-xz already compresses to ≤ 0.30 of the input (already-strong corpora like `primary.3b.bin`). A 128 KiB size threshold keeps small text files out of the plan search. On the new `depth_anything_v2_vits.pth` corpus it wins by **~7 MB (~7.8 %)** vs raw-xz alone: raw-xz `90 414 940 → 83 380 790` adaptive-transformed-xz, final ratio `0.840376` on 99 218 434 input bytes.
 
-### ZBPK v4: bit-wise dictionaries plus text-codec method slot
+### ZBPK v4/v5: bit-wise dictionaries plus structural method slots
 
 The on-disk format is now **ZBPK v4**. v3 rebuilt every dictionary section under the same rule the topology bit-packing introduced: spend only the bits each enumeration value or magnitude actually needs, never a whole byte for a single bit of state. v4 keeps that layout and uses another reserved 4-bit method slot for `raw-brotli`, a no-dictionary payload method for text-heavy inputs:
 
@@ -332,13 +334,14 @@ The on-disk format is now **ZBPK v4**. v3 rebuilt every dictionary section under
 - **Adaptive-transformed-xz dictionary.** One packed byte `(codec:2 | kind_index:6)` plus varint `period`/`head`/`plain_len`. Drops from 18 B to ~9 B.
 - **Monotonic-delta dictionary.** One packed byte `(width-1:3 | mode:3 | codec:2)`, then `trailing_zero_shift` (6 bits used out of its byte), then varint `count`/`first_value`/`transformed_plain_len`. Drops from 28 B to ~12 B.
 - **Raw-brotli payload.** No dictionary; the payload is a Brotli q11 stream. It is evaluated only for bounded text-like inputs and selected only when it beats the other total packed sizes.
+- **Prime-sequence dictionary (v5, opt-in encoder).** A no-payload structural method for exact consecutive-prime tables: one byte width plus varint `count`, `first_value`, and `last_value`. Decoding stays enabled for v5 files; encoding requires `ZBIT_ENABLE_PRIME_SEQUENCE=1`.
 
 All five share the **same** dense `kind_to_compact_index` table the topology bit-packing introduced, so the 49 distinct `CircuitTransformKind`-derived values fit in exactly 6 bits everywhere they appear. Measured wins on the existing corpus (all `PASS`):
 
 | Corpus | Before v3 | After v3 | Δ bytes |
 |---|---:|---:|---:|
 | paper | 20 580 | **20 561** | −19 B |
-| primary.3b | 562 836 | **562 799** | −37 B |
+| primary.3b | 562 836 | **562 799** | −37 B (v5 prime-sequence can improve to 25 B when explicitly enabled) |
 | cat | 2 670 624 | **2 670 571** | −53 B (cumulative −147 B vs the original v2) |
 
 The absolute byte counts are small because the payload dominates, but the format no longer carries any bits the enumerations themselves don't need — every bit on the wire is principled.

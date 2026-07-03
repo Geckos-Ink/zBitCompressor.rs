@@ -13,6 +13,43 @@
 - License file: `LICENSE`
 
 ## Recent Updates
+- 2026-07-03: Disabled ZBPK v5 `prime-sequence` by default after review because the
+  25-byte `primary.3b` result is too corpus-specific for general compression-ratio
+  comparisons. The method remains implemented and decodable, but encoder evaluation now
+  requires `ZBIT_ENABLE_PRIME_SEQUENCE=1`; default balanced runs skip the sieve/detector
+  and keep `primary.3b` on the general `monotonic-delta` path (`562 799` bytes).
+
+  Files modified:
+  - **`zbit-rs/src/pack_rules.rs`** — added `PackMethod::PrimeSequence` at method index 12
+    (leaving v4 `AdaptiveTransformedXz` at 11 for compatibility); method selection ranks
+    the new structural candidate by packed total bytes.
+  - **`zbit-rs/src/pack/core.rs`** — bumped `ZBPK_VERSION` to 5; added
+    `PrimeSequenceStream`, candidate accounting/reporting field, write/decode dispatch,
+    and raw-XZ skip participation as an opt-in structural candidate. Default runs push a
+    skipped-candidate note instead of evaluating the prime detector.
+  - **`zbit-rs/src/pack/codecs.rs`** — added prime-table detection, dictionary sizing/writing,
+    and decode regeneration via bounded sieve. The existing optional monotonic gap-transform
+    slot remains deep/research-only and is not paid in balanced.
+  - **`zbit-rs/src/pack/stream.rs`** — updated `write_pack_bytes` callsites for the new
+    prime-sequence argument (stream node packing does not evaluate the prime method).
+  - **`zbit-rs/src/bin/benchmark_real_file.rs`** — report now prints prime-sequence
+    candidate size.
+  - **`zbit-rs/src/pack/tests.rs`** — added opt-in prime-sequence roundtrip coverage and
+    default-disabled regression coverage.
+  - **`zbit-rs/scripts/check_benchmark_budgets.sh`, `README.md`, `ROADMAP.md`,
+    `zbit-rs/benchmark_primary.3b_latest.txt`, `AGENTS.md`** — restored the default
+    primary baseline to monotonic-delta and documented the opt-in method.
+
+  Benchmark status (balanced, release):
+  - default primary.3b `3 233 613 -> 562 799` bytes, ratio `0.174046`, compression
+    `3 271.924 ms`, decompression `33.379 ms`, validation PASS.
+  - opt-in `ZBIT_ENABLE_PRIME_SEQUENCE=1` still produces `25` bytes on the exact prime
+    table and roundtrips in unit coverage, but is excluded from the default ratio protocol.
+  - Primary budget harness expects `562 799` bytes and `<= 4.0 s` wall time.
+
+  Validation: `cargo check --manifest-path zbit-rs/Cargo.toml` PASS;
+  `cargo test -q --manifest-path zbit-rs/Cargo.toml` PASS (40 lib tests + non-ignored
+  integration tests); `zbit-rs/scripts/check_benchmark_budgets.sh primary.3b` PASS.
 - 2026-07-02: Benchmark-suite runtime pass (non-stream). **No format change; all tracked
   compressed outputs byte-identical** (paper `18573`, primary `562799`, cat `2670567`).
 
