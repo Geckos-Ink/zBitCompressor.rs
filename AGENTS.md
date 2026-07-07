@@ -13,6 +13,16 @@
 - License file: `LICENSE`
 
 ## Recent Updates
+- 2026-07-07: Replaced outdated PolyForm headers in all project-owned `zbit-rs/**/*.rs`
+  files with GNU Affero General Public License v3.0 notices to match the current
+  top-level `LICENSE`. Left `vendor/preflate-rs/**/*.rs` untouched because those files
+  retain third-party ownership and license notices.
+
+  Files modified:
+  - **`zbit-rs/src/**/*.rs` / `zbit-rs/tests/*.rs` / `zbit-rs/src/bin/*.rs`** —
+    header-only sweep updating the top-of-file short license notice from PolyForm
+    Noncommercial to GNU AGPL v3.0.
+
 - 2026-07-03: Landed the first general ratio-improvement pass after disabling the
   corpus-specific prime path: real LZMA delta-filter support, an exact repeated-block
   Circuit Atlas candidate, and a stored-ZIP tensor/metadata split candidate. ZBPK is now

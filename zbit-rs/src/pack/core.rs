@@ -1,4 +1,4 @@
-// Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE.
+// Licensed under the GNU Affero General Public License v3.0. See LICENSE.
 // Copyright (c) 2026 Riccardo Cecchini <rcecchini.ds@gmail.com>.
 
 use std::cmp::Reverse;

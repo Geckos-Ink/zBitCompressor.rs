@@ -1,4 +1,4 @@
-// Licensed under the PolyForm Noncommercial License 1.0.0. See LICENSE.
+// Licensed under the GNU Affero General Public License v3.0. See LICENSE.
 // Copyright (c) 2026 Riccardo Cecchini <rcecchini.ds@gmail.com>.
 
 fn push_u16(out: &mut Vec<u8>, value: u16) {
@@ -245,4 +245,3 @@ fn read_varint_u64(bytes: &[u8], cursor: &mut usize) -> ZbitResult<u64> {
         "varint exceeds 10-byte u64 representation".to_string(),
     ))
 }
-
